@@ -1,0 +1,644 @@
+{
+  "fps": 30.0,
+  "keys": {
+    "1": {
+      "Chest": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "Head": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "Hips": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftFoot": [
+        0.0,
+        0.70710676908493,
+        -0.70710676908493,
+        0.0
+      ],
+      "LeftHand": [
+        0.0,
+        0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "LeftIndexDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftIndexIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftIndexProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLowerArm": [
+        0.0,
+        -0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "LeftLowerLeg": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftMiddleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftMiddleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftMiddleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftShoulder": [
+        0.5,
+        0.5,
+        0.5,
+        -0.5
+      ],
+      "LeftThumbDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftThumbMetacarpal": [
+        -0.214186728000641,
+        0.673887252807617,
+        0.214186728000641,
+        0.673887252807617
+      ],
+      "LeftThumbProximal": [
+        -0.0000000149011629702045,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftToes": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftUpperArm": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftUpperLeg": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "Neck": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightFoot": [
+        0.0,
+        0.70710676908493,
+        -0.70710676908493,
+        0.0
+      ],
+      "RightHand": [
+        0.0,
+        -0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "RightIndexDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightIndexIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightIndexProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLowerArm": [
+        0.0,
+        0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "RightLowerLeg": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightMiddleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightMiddleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightMiddleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightShoulder": [
+        0.5,
+        -0.5,
+        -0.5,
+        -0.5
+      ],
+      "RightThumbDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightThumbMetacarpal": [
+        -0.214186728000641,
+        -0.673887252807617,
+        -0.214186728000641,
+        0.673887252807617
+      ],
+      "RightThumbProximal": [
+        -0.0000000149011629702045,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightToes": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightUpperArm": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightUpperLeg": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "Spine": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "UpperChest": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "47": {
+      "Chest": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "Head": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "Hips": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftFoot": [
+        0.0,
+        0.70710676908493,
+        -0.70710676908493,
+        0.0
+      ],
+      "LeftHand": [
+        0.0,
+        0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "LeftIndexDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftIndexIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftIndexProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLittleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftLowerArm": [
+        0.0,
+        -0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "LeftLowerLeg": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftMiddleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftMiddleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftMiddleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftRingProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftShoulder": [
+        0.5,
+        0.5,
+        0.5,
+        -0.5
+      ],
+      "LeftThumbDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftThumbMetacarpal": [
+        -0.214186728000641,
+        0.673887252807617,
+        0.214186728000641,
+        0.673887252807617
+      ],
+      "LeftThumbProximal": [
+        -0.0000000149011629702045,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "LeftToes": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftUpperArm": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "LeftUpperLeg": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "Neck": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightFoot": [
+        0.0,
+        0.70710676908493,
+        -0.70710676908493,
+        0.0
+      ],
+      "RightHand": [
+        0.0,
+        -0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "RightIndexDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightIndexIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightIndexProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLittleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightLowerArm": [
+        0.0,
+        0.70710676908493,
+        0.0,
+        0.70710676908493
+      ],
+      "RightLowerLeg": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightMiddleDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightMiddleIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightMiddleProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingIntermediate": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightRingProximal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightShoulder": [
+        0.5,
+        -0.5,
+        -0.5,
+        -0.5
+      ],
+      "RightThumbDistal": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightThumbMetacarpal": [
+        -0.214186728000641,
+        -0.673887252807617,
+        -0.214186728000641,
+        0.673887252807617
+      ],
+      "RightThumbProximal": [
+        -0.0000000149011629702045,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "RightToes": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightUpperArm": [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      "RightUpperLeg": [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ],
+      "Spine": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ],
+      "UpperChest": [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    }
+  },
+  "length": 48,
+  "loop": true,
+  "roots": {
+
+  },
+  "shapes": {
+
+  },
+  "spans": {
+
+  }
+}

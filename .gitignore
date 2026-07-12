@@ -1,0 +1,23 @@
+# Godot 导入缓存（首次打开会自己重建）
+.godot/
+*.translation
+
+# 本机专属的工具配置：里面有本地绝对路径（Godot 安装位置、Windows 用户名），不进仓库
+.claude/
+
+# MediaPipe 模型权重（13MB，Google 的 Apache-2.0 权重）
+# tools/mocap/capture.py 首次运行会自动下载
+tools/mocap/models/*.task
+tools/mocap/models/*.part
+
+# 导出产物：Godot 导出的可执行文件（.exe 有 100MB，别往 git 里塞）
+export/
+*.exe
+*.pck
+*.zip
+*.7z
+*.rar
+
+# 临时文件
+*.tmp
+__pycache__/
