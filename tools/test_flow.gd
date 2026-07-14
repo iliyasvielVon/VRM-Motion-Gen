@@ -115,12 +115,14 @@ func _run() -> void:
 	_ok(data["ok"] and (data["keys"] as Dictionary).size() == 2, "工程 .pose.json 存下了 2 个关键帧")
 	_ok((data["spans"] as Dictionary).get(0) == AnimBaker.Ease.IN_OUT, "工程存下了补间区间的缓动曲线")
 
-	# 旧工程（12 根骨、没有 spans 字段）必须照读不误，补间行为退回全线性
+	# 旧工程（12 根骨、没有 spans 字段）必须照读不误，补间行为退回全线性。
+	# 用一份专门冻起来的副本（_自检旧工程），不用示例动作「圆舞_循环」本身——示例是用户会
+	# 打开来改的，拿它当测试基准的话，用户存一次盘测试就红了（真发生过，示例还被覆盖了）
 	print("\n[旧工程兼容]")
-	var old := AnimBaker.load_project("圆舞_循环")
-	_ok(old["ok"], "读得动旧工程 圆舞_循环")
+	var old := AnimBaker.load_project("_自检旧工程")
+	_ok(old["ok"], "读得动旧格式工程（12 根骨、无 spans/shapes 字段）")
 	_ok((old["spans"] as Dictionary).is_empty(), "旧工程没有 spans 字段 → 默认全线性")
-	s._name_edit.text = "圆舞_循环"
+	s._name_edit.text = "_自检旧工程"
 	s._load_project()
 	_ok(s._keys.size() > 0 and s._spans.is_empty(), "旧工程读进编辑器（%d 个关键帧）" % s._keys.size())
 	var old_anim := AnimBaker.bake(s._keys, s._len, s._loop, s._spans)

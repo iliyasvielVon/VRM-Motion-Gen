@@ -1,2 +1,7 @@
 mediapipe>=0.10.30
 opencv-python>=4.8
+# 下面两个只有 --phone（手机当摄像头）才用得上：
+#   aiohttp      —— 起 HTTPS 服务 + WebSocket 收手机传来的画面
+#   cryptography —— 现签一张自签证书（浏览器只在 HTTPS 下才给摄像头权限）
+aiohttp>=3.9
+cryptography>=42

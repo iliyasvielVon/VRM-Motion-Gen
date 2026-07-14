@@ -39,6 +39,8 @@ VRoid Studio 2.13.0 导出的模型，**作者：测试样例人**。它的 VRM 
 | [MediaPipe](https://github.com/google-ai-edge/mediapipe) | Apache-2.0 | `pip install` 装 |
 | `holistic_landmarker.task` 模型权重（13MB） | Apache-2.0（Google） | **不在仓库里**：`tools/mocap/capture.py` 首次运行会自己下 |
 | [OpenCV](https://opencv.org/) | Apache-2.0 | `pip install` 装 |
+| [aiohttp](https://github.com/aio-libs/aiohttp) | Apache-2.0 | 只有手机动补（`--phone`）用得上 |
+| [cryptography](https://github.com/pyca/cryptography) | Apache-2.0 / BSD | 同上，用来现签局域网自签证书 |
 
 ## 引擎
 

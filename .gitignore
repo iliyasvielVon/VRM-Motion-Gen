@@ -10,6 +10,9 @@
 tools/mocap/models/*.task
 tools/mocap/models/*.part
 
+# 手机动补的自签证书（含私钥，绝不进仓库；每台机器首次跑 --phone 时自己生成）
+tools/mocap/.cert/
+
 # 导出产物：Godot 导出的可执行文件（.exe 有 100MB，别往 git 里塞）
 export/
 *.exe

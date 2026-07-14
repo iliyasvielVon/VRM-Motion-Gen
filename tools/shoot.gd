@@ -41,6 +41,25 @@ func _process(_d: float) -> bool:
 		print("IK 肩 %v 目标 %v → 实到 %v（差 %.1f mm）"
 			% [shoulder, target, got, got.distance_to(target) * 1000.0])
 		return false
+	if _n == 10 and "--tl" in OS.get_cmdline_user_args():
+		# 造一段带各种补间的时间轴：线性 / 缓入缓出 / 定格，验证色带和箭头画得对不对
+		_shot = "studio_timeline"
+		_studio._len = 48
+		_studio._click_frame(0, false)
+		_studio._insert_key()
+		for f in [10, 24, 40, 47]:
+			_studio._click_frame(f, false)
+			_studio._select_bone("LeftUpperArm")
+			_studio._pose["LeftUpperArm"] = Quaternion(Vector3.RIGHT, deg_to_rad(-20 * f / 10.0)) \
+				* _studio._rest_rot[_studio._bones["LeftUpperArm"]]
+			_studio._insert_key()
+		_studio._spans[0] = AnimBaker.Ease.LINEAR
+		_studio._spans[10] = AnimBaker.Ease.IN_OUT
+		_studio._spans[24] = AnimBaker.Ease.HOLD
+		_studio._click_frame(10, false)
+		_studio._click_frame(24, true)      # 拉一个选区出来看底色
+		_studio._goto_frame(17.0)
+		return false
 	if _n == 10 and _mocap:
 		for i in _studio._mocap_opt.item_count:
 			if _studio._mocap_opt.get_item_text(i) == "自检正面.mocap.json":

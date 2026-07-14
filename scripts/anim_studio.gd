@@ -21,7 +21,6 @@ extends Node3D
 
 const AVATAR := "res://avatars/avatar0.vrm"
 
-const CELL_W := 19        # 时间轴帧格宽（像素）
 const MAX_FRAMES := 240   # 8 秒 @30fps
 const PANEL_X := 1288.0   # 右侧骨骼面板左边缘 —— 3D 拾取区就是它左边那块
 const STAGE_TOP := 96.0   # 3D 拾取区上边缘（顶栏两行之下）
@@ -105,10 +104,9 @@ var _tree_items := {}            # 骨骼名 -> TreeItem
 var _tree_syncing := false       # 3D 选骨 → 回写树选中，别让 item_selected 再弹回来
 var _sliders := {}
 var _slider_vals := {}
-var _tl_scroll: ScrollContainer
-var _tl_inner: Control
-var _cells: Array = []
-var _styles := {}                # 帧格样式缓存："kind|sel|cur" -> StyleBoxFlat
+var _timeline: Timeline
+var _tl_menu: PopupMenu
+var _tl_menu_frame := -1
 var _last_drawn_frame := -1
 
 
@@ -234,7 +232,7 @@ func _process(delta: float) -> void:
 	if int(_playhead) != _last_drawn_frame:
 		_redraw_timeline()
 		if _playing:
-			_scroll_to_playhead()
+			_timeline.follow_playhead()
 	if _drag == Drag.NONE and not _playing:
 		var m := get_viewport().get_mouse_position()
 		_overlay.hovered = _overlay.pick_bone(m) if _in_stage(m) else ""
@@ -492,7 +490,7 @@ func _toggle_live() -> void:
 	_live = true
 	_set_playing(false)
 	_live_btn.text = "实时动补：开"
-	_show_hint("在等 UDP %d 的关键点：另开一个终端跑 python tools/mocap/capture.py --camera 0"
+	_show_hint("在等 UDP %d 的关键点：另开终端跑 capture.py --camera 0（电脑摄像头）或 --phone（手机）"
 		% MOCAP_PORT)
 
 
@@ -600,7 +598,6 @@ func _import_mocap() -> void:
 	_len_edit.text = str(_len)
 	_sel_a = -1
 	_sel_b = -1
-	_rebuild_cells()
 	_goto_frame(0)
 	_show_hint("已导入 %s：%d 帧关键帧%s。想手改先按「抽稀」"
 		% [file, _keys.size(), "（%d 帧没认出人，已跳过）" % miss if miss > 0 else ""])
@@ -667,7 +664,8 @@ func _set_playing(on: bool) -> void:
 		_goto_frame(_playhead)
 
 
-## 时间轴上点一帧 = 移播放头 + 起选区；Shift 点 = 拉到这一帧收选区
+## 程序化地「点一帧」——等价于在时间轴上点击（Shift 点击 = extend）。
+## 时间轴控件自己会发信号，这个函数是给自检脚本和工具脚本用的入口。
 func _click_frame(f: int, extend: bool) -> void:
 	if extend and _sel_a >= 0:
 		_sel_b = f
@@ -705,8 +703,12 @@ func _save_project() -> void:
 	if n.is_empty() or _keys.is_empty():
 		_show_hint("先起个动作名并至少插一个关键帧")
 		return
-	_show_hint("工程已保存 → %s" % AnimBaker.project_path(n)
-		if AnimBaker.save_project(n, _keys, _len, _loop, _spans, _shapes, _roots) else "保存失败")
+	var existed := FileAccess.file_exists(AnimBaker.project_path(n))
+	if not AnimBaker.save_project(n, _keys, _len, _loop, _spans, _shapes, _roots):
+		_show_hint("保存失败")
+		return
+	_show_hint("%s工程「%s」（%d 个关键帧）"
+		% ["⚠ 已覆盖" if existed else "已保存", n, _keys.size()])
 
 
 func _load_project() -> void:
@@ -726,7 +728,6 @@ func _load_project() -> void:
 	_len_edit.text = str(_len)
 	_sel_a = -1
 	_sel_b = -1
-	_rebuild_cells()
 	_goto_frame(0)
 	_show_hint("已读取工程「%s」（%d 个关键帧%s）"
 		% [n, _keys.size(), "，含表情" if not _shapes.is_empty() else ""])
@@ -814,7 +815,7 @@ func _build_mocap_bar(ui: Control) -> void:
 	ui.add_child(dec)
 
 	var tip := Label.new()
-	tip.text = "视频：python tools/mocap/capture.py --video x.mp4 --out 名字 ｜ 摄像头：--camera 0"
+	tip.text = "python tools/mocap/capture.py  ──  视频：--video x.mp4 --out 名字 ｜ 电脑摄像头：--camera 0 ｜ 手机：--phone"
 	tip.position = Vector2(758, 63)
 	tip.add_theme_font_size_override("font_size", 12)
 	tip.add_theme_color_override("font_color", ClientTheme.TEXT_DIM)
@@ -836,7 +837,7 @@ func _build_topbar(ui: Control) -> void:
 	_name_edit = LineEdit.new()
 	_name_edit.position = Vector2(250, 18)
 	_name_edit.size = Vector2(200, 34)
-	_name_edit.text = "圆舞_循环"
+	_name_edit.text = "新动作"
 	_name_edit.placeholder_text = "动作名"
 	ClientTheme.style_line_edit(_name_edit)
 	ui.add_child(_name_edit)
@@ -999,7 +1000,7 @@ func _build_timeline(ui: Control) -> void:
 	ClientTheme.style_button(head_btn, 14)
 	head_btn.pressed.connect(func():
 		_set_playing(false)
-		_click_frame(0, false))
+		_goto_frame(0))
 	bar.add_child(head_btn)
 	var key_btn := Button.new()
 	key_btn.text = "◆ 插关键帧 (F6)"
@@ -1052,7 +1053,6 @@ func _build_timeline(ui: Control) -> void:
 	_len_edit.text_submitted.connect(func(t):
 		_len = clampi(int(t), 2, MAX_FRAMES)
 		_len_edit.text = str(_len)
-		_rebuild_cells()
 		_goto_frame(minf(_playhead, _len - 1)))
 	bar.add_child(_len_edit)
 	_frame_lbl = Label.new()
@@ -1060,107 +1060,99 @@ func _build_timeline(ui: Control) -> void:
 	_frame_lbl.add_theme_color_override("font_color", ClientTheme.ACCENT)
 	bar.add_child(_frame_lbl)
 
-	_tl_scroll = ScrollContainer.new()
-	_tl_scroll.position = Vector2(12, 54)
-	_tl_scroll.size = Vector2(1544, 74)
-	_tl_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_SHOW_ALWAYS
-	_tl_scroll.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	bar.add_child(_tl_scroll)
-	_tl_inner = Control.new()
-	_tl_scroll.add_child(_tl_inner)
-	_rebuild_cells()
+	_timeline = Timeline.new()
+	_timeline.position = Vector2(12, 54)
+	_timeline.size = Vector2(1544, 62)
+	_timeline.length = _len
+	_timeline.keys = _keys
+	_timeline.spans = _spans
+	_timeline.scrubbed.connect(_on_scrub)
+	_timeline.key_moved.connect(_move_key)
+	_timeline.selection_changed.connect(_on_tl_selection)
+	_timeline.menu_requested.connect(_on_tl_menu)
+	bar.add_child(_timeline)
 
-
-## 重建时间轴帧格（总帧数变化时）
-func _rebuild_cells() -> void:
-	for c in _cells:
-		(c as Button).queue_free()
-	_cells.clear()
-	_tl_inner.custom_minimum_size = Vector2(_len * CELL_W, 52)
-	for i in range(_len):
-		var cell := Button.new()
-		cell.position = Vector2(i * CELL_W, 0)
-		cell.size = Vector2(CELL_W - 2, 48)
-		cell.text = str(i + 1) if (i + 1) % 5 == 0 else ""
-		cell.add_theme_font_size_override("font_size", 9)
-		cell.add_theme_color_override("font_color", Color(0.91, 0.85, 0.72, 0.7))
-		cell.tooltip_text = "第 %d 帧（Shift 点击 = 拉选区）" % (i + 1)
-		var f := i
-		cell.pressed.connect(func(): _click_frame(f, Input.is_key_pressed(KEY_SHIFT)))
-		_tl_inner.add_child(cell)
-		_cells.append(cell)
+	# 右键菜单（Animate 里那套「插入关键帧 / 创建补间…」）
+	_tl_menu = PopupMenu.new()
+	for item in ["◆ 插入关键帧", "✕ 删除关键帧", "", "⇥ 用当前缓动创建补间", "清除补间（改回线性）"]:
+		if item.is_empty():
+			_tl_menu.add_separator()
+		else:
+			_tl_menu.add_item(item)
+	_tl_menu.id_pressed.connect(_on_tl_menu_pick)
+	_timeline.add_child(_tl_menu)
 	_redraw_timeline()
 
 
-func _scroll_to_playhead() -> void:
-	var x := int(_playhead) * CELL_W
-	var view := int(_tl_scroll.size.x) - 20
-	var cur := _tl_scroll.scroll_horizontal
-	if x < cur or x > cur + view - CELL_W:
-		_tl_scroll.scroll_horizontal = clampi(x - view / 2, 0, maxi(0, _len * CELL_W - view))
+# ---------------------------------------------------------------- 时间轴回调
+
+## 拖播放头擦帧：只移播放头，不落关键帧
+func _on_scrub(f: float) -> void:
+	_set_playing(false)
+	_goto_frame(f)
 
 
-## 帧格类型：0 空白 1 关键帧 2 线性补间 3 缓动补间 4 定格
-func _cell_kind(i: int, fs: Array) -> int:
-	if _keys.has(i):
-		return 1
-	if fs.is_empty() or i < int(fs[0]) or i > int(fs.back()):
-		return 0
-	var start: int = fs[0]
-	for f in fs:
-		if int(f) <= i:
-			start = f
-		else:
-			break
-	var e := int(_spans.get(start, AnimBaker.Ease.LINEAR))
-	if e == AnimBaker.Ease.HOLD:
-		return 4
-	return 2 if e == AnimBaker.Ease.LINEAR else 3
+func _on_tl_selection(a: int, b: int) -> void:
+	_sel_a = a
+	_sel_b = b
+	_redraw_timeline()
 
 
-const KIND_BG := [Color(0.10, 0.03, 0.03, 0.8), Color(0.72, 0.5, 0.16, 0.95),
-	Color(0.34, 0.09, 0.07, 0.9), Color(0.17, 0.13, 0.34, 0.92), Color(0.22, 0.20, 0.20, 0.9)]
+## 拖动关键帧搬家：姿势、补间区间、表情、胯位移都要跟着一起搬，落点上有旧关键帧就覆盖
+func _move_key(from_frame: int, to_frame: int) -> void:
+	if not _keys.has(from_frame) or from_frame == to_frame:
+		return
+	for d in [_keys, _shapes, _roots, _spans]:
+		if (d as Dictionary).has(from_frame):
+			(d as Dictionary)[to_frame] = (d as Dictionary)[from_frame]
+			(d as Dictionary).erase(from_frame)
+	_goto_frame(float(to_frame))
+	_show_hint("关键帧 %d → %d" % [from_frame + 1, to_frame + 1])
 
 
-func _cell_style(kind: int, sel: bool, cur: bool) -> StyleBoxFlat:
-	var key := "%d|%d|%d" % [kind, int(sel), int(cur)]
-	if _styles.has(key):
-		return _styles[key]
-	var bg: Color = KIND_BG[kind]
-	var edge := Color(0.6, 0.49, 0.29, 0.18)
-	var bw := 1
-	if sel:
-		bg = bg.lightened(0.12)
-		edge = ClientTheme.ACCENT
-		bw = 2
-	if cur:
-		edge = Color.WHITE
-		bw = 2
-	# 不用 ClientTheme.tech_style：它带 10px 左右内边距，会把 17px 宽的帧格撑开重叠
-	var sb := StyleBoxFlat.new()
-	sb.bg_color = bg
-	sb.set_border_width_all(bw)
-	sb.border_color = edge
-	sb.set_corner_radius_all(2)
-	_styles[key] = sb
-	return sb
+func _on_tl_menu(frame: int, screen_pos: Vector2) -> void:
+	_tl_menu_frame = frame
+	_tl_menu.position = Vector2i(screen_pos)
+	_tl_menu.reset_size()
+	_tl_menu.popup()
 
 
-## 时间轴着色：关键帧金格、线性补间暗红、缓动补间蓝紫、定格灰、选区金边、播放头白边
+func _on_tl_menu_pick(id: int) -> void:
+	var f := _tl_menu_frame
+	match id:
+		0:
+			_goto_frame(float(f))
+			_insert_key()
+			_show_hint("已在第 %d 帧插入关键帧" % (f + 1))
+		1:
+			_goto_frame(float(f))
+			_delete_key()
+			_show_hint("已删除第 %d 帧的关键帧" % (f + 1))
+		3:
+			_make_tween()
+		4:
+			for k in AnimBaker.sorted_frames(_keys):
+				if _sel_a >= 0 and k >= mini(_sel_a, _sel_b) and k < maxi(_sel_a, _sel_b):
+					_spans.erase(k)
+			_redraw_timeline()
+			_show_hint("选区内的补间已改回线性")
+
+
+## 刷新时间轴（数据变了就调它；控件自己负责画）
 func _redraw_timeline() -> void:
-	if _cells.is_empty():
+	if _timeline == null:
 		return
 	_last_drawn_frame = int(_playhead)
-	var fs := AnimBaker.sorted_frames(_keys)
-	var lo := mini(_sel_a, _sel_b) if _sel_a >= 0 else -1
-	var hi := maxi(_sel_a, _sel_b) if _sel_a >= 0 else -2
-	for i in range(_cells.size()):
-		var sb := _cell_style(_cell_kind(i, fs), i >= lo and i <= hi, i == _last_drawn_frame)
-		var cell := _cells[i] as Button
-		cell.add_theme_stylebox_override("normal", sb)
-		cell.add_theme_stylebox_override("hover", sb)
-		cell.add_theme_stylebox_override("pressed", sb)
+	_timeline.length = _len
+	_timeline.keys = _keys
+	_timeline.spans = _spans
+	_timeline.playhead = _playhead
+	_timeline.sel_a = _sel_a
+	_timeline.sel_b = _sel_b
+	_timeline.refresh()
 	if _frame_lbl != null:
+		var lo := mini(_sel_a, _sel_b) if _sel_a >= 0 else -1
+		var hi := maxi(_sel_a, _sel_b) if _sel_a >= 0 else -2
 		var sel_txt := "｜选区 %d–%d" % [lo + 1, hi + 1] if lo >= 0 and hi > lo else ""
 		_frame_lbl.text = "帧 %d / %d ｜ 关键帧 %d 个%s" % [_last_drawn_frame + 1, _len,
 			_keys.size(), sel_txt]
