@@ -65,7 +65,53 @@ func _initialize() -> void:
 		% [hard_full["arms"], full["arms"]])
 	print("      差距全在深度，说明「拍动补时尽量正对镜头、别让肢体前后穿插」是真的有用。")
 
-	print("\n[5. 平滑]")
+	print("\n[5. 可见度门控：被遮挡的腿保持上一帧，不乱飘]")
+	# 同色裤腿/出画时 MediaPipe 照样硬给一个瞎猜的坐标，只是 visibility 很低。
+	# 门控要保证：这种帧腿部不接垃圾数据，而是保持上一帧的姿态。
+	var raw_frames: Array = JSON.parse_string(FileAccess.get_file_as_string(
+		"res://animations/mocap/自检正面.mocap.json"))["frames"]
+	var base := {}
+	for fr in raw_frames:
+		if fr.get("pose") != null:
+			base = fr
+			break
+	var r1 := _mocap.solve(base)
+	var blocked := {"pose": []}
+	for i in range(33):
+		var pt: Array = (base["pose"] as Array)[i]
+		if i >= 25:   # 膝/踝/脚跟/脚尖全标成「看不见」+ 塞进垃圾坐标
+			(blocked["pose"] as Array).append([9.9, -9.9, 9.9, 0.05])
+		else:
+			(blocked["pose"] as Array).append([pt[0], pt[1], pt[2], 1.0])
+	var r2 := _mocap.solve(blocked, r1)
+	var held := true
+	for b in ["LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+			"RightUpperLeg", "RightLowerLeg", "RightFoot"]:
+		if not (r2["bones"][b] as Quaternion).is_equal_approx(r1["bones"][b]):
+			held = false
+	_ok(held, "腿部关键点标记不可见后，六根腿骨全部保持上一帧（不接垃圾坐标）")
+	var r3 := _mocap.solve(blocked)   # 没有上一帧可保持 → 回静止姿态，也不能接垃圾
+	var rest_q: Quaternion = _mocap.solver.skel.get_bone_rest(
+		_mocap.solver.bones["LeftUpperLeg"]).basis.get_rotation_quaternion()
+	_ok((r3["bones"]["LeftUpperLeg"] as Quaternion).is_equal_approx(rest_q),
+		"没有上一帧时回静止姿态（也不接垃圾坐标）")
+
+	print("\n[6. 眨眼：MediaPipe 的分数峰值只有 ~0.5，要拉伸校准才闭得上眼]")
+	var fb := {"pose": base["pose"], "bs": {"eyeBlinkLeft": 0.5, "eyeBlinkRight": 0.14}}
+	var rb := _mocap.solve(fb)
+	_ok(float((rb["shapes"] as Dictionary).get("Fcl_EYE_Close_L", 0.0)) > 0.95,
+		"闭眼峰值分数 0.5 → 左眼全闭（实为 %.2f）"
+		% float((rb["shapes"] as Dictionary).get("Fcl_EYE_Close_L", 0.0)))
+	_ok(float((rb["shapes"] as Dictionary).get("Fcl_EYE_Close_R", 1.0)) < 0.1,
+		"睁眼基线抖动 0.14 → 右眼几乎不动（不会常年半眯眼）")
+	var sm2 := Mocap.smooth(
+		{"bones": {}, "shapes": {"Fcl_EYE_Close_L": 0.0}},
+		{"bones": {}, "shapes": {"Fcl_EYE_Close_L": 1.0}}, 0.75, 0.2)
+	_ok(float(sm2["shapes"]["Fcl_EYE_Close_L"]) >= 0.79,
+		"表情走单独的小平滑：一帧就到 %.2f（按骨骼那档 0.75 平滑，眨眼会被磨没）"
+		% float(sm2["shapes"]["Fcl_EYE_Close_L"]))
+
+	print("\n[7. 平滑]")
 	var f: Array = probe["solved"]
 	var sm := Mocap.smooth(f[0], f[1], 0.75)
 	var raw := _angle(f[0]["bones"]["RightUpperArm"], f[1]["bones"]["RightUpperArm"])

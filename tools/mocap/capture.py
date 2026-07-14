@@ -73,6 +73,18 @@ def to_godot(landmarks):
     return [[round(p.x, 4), round(-p.y, 4), round(-p.z, 4)] for p in landmarks]
 
 
+def to_godot_pose(landmarks):
+    """身体关键点多带一个可见度 [x, y, z, vis]。
+
+    被同色裤腿/画面边缘吞掉的关节，MediaPipe 照样硬给一个瞎猜的坐标，只是 visibility
+    很低——不把这个数带出去，Godot 侧就没法分辨「测到的腿」和「猜的腿」，腿会乱飘。
+    （手部关键点没有这个字段：手是整只检测的，丢就整只丢。）"""
+    if not landmarks:
+        return None
+    return [[round(p.x, 4), round(-p.y, 4), round(-p.z, 4),
+             round(1.0 if p.visibility is None else p.visibility, 3)] for p in landmarks]
+
+
 def pick_blendshapes(categories):
     if not categories:
         return None
@@ -130,8 +142,17 @@ def draw_preview(bgr, result):
         for a, b in POSE_EDGES:
             cv2.line(bgr, px(result.pose_landmarks[a]), px(result.pose_landmarks[b]),
                      (120, 220, 255), 2)
+        lost = 0
         for lm in result.pose_landmarks:
-            cv2.circle(bgr, px(lm), 3, (60, 160, 255), -1)
+            seen = (1.0 if lm.visibility is None else lm.visibility) >= 0.5
+            if not seen:
+                lost += 1
+            # 红点 = 这个关节没跟踪到（被遮挡/出画/和背景同色）——Godot 那边它会保持上一帧
+            cv2.circle(bgr, px(lm), 3 if seen else 5,
+                       (60, 160, 255) if seen else (40, 40, 235), -1)
+        if lost:
+            cv2.putText(bgr, "LOST %d joints - red dots hold last pose" % lost,
+                        (12, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (40, 40, 235), 2)
     for hand in (result.left_hand_landmarks, result.right_hand_landmarks):
         if hand:
             for a, b in HAND_EDGES:
@@ -169,7 +190,7 @@ def run_phone(args, landmarker, sock, addr, frames):
 
 def pack(result) -> dict:
     return {
-        "pose": to_godot(result.pose_world_landmarks),
+        "pose": to_godot_pose(result.pose_world_landmarks),
         "lh": to_godot(result.left_hand_world_landmarks),
         "rh": to_godot(result.right_hand_world_landmarks),
         "bs": pick_blendshapes(result.face_blendshapes),

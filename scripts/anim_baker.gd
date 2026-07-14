@@ -251,6 +251,49 @@ static func _quat_deg(a: Quaternion, b: Quaternion) -> float:
 	return rad_to_deg(2.0 * acos(clampf(absf(a.dot(b)), 0.0, 1.0)))
 
 
+## 表情通道的抽稀（同一套 Douglas-Peucker，误差换成通道值的线性插值偏差）。
+## 表情必须和骨骼分开抽：眨眼的时候骨骼一动不动，按骨骼的转折点抽，
+## 眨眼那三四帧会被整段抽掉——录了个眨眼，抽完稀眼睛就再也不眨了。
+static func decimate_channels(chans: Dictionary, tol: float) -> Dictionary:
+	var fs := sorted_frames(chans)
+	if fs.size() <= 2:
+		return chans.duplicate()
+	var keep := {fs[0]: true, fs[fs.size() - 1]: true}
+	_split_ch(chans, fs, 0, fs.size() - 1, tol, keep)
+	var out := {}
+	for f in fs:
+		if keep.has(f):
+			out[f] = chans[f]
+	return out
+
+
+static func _split_ch(chans: Dictionary, fs: Array, i0: int, i1: int, tol: float,
+		keep: Dictionary) -> void:
+	if i1 - i0 < 2:
+		return
+	var a: Dictionary = chans[fs[i0]]
+	var b: Dictionary = chans[fs[i1]]
+	var names := {}
+	for i in range(i0, i1 + 1):
+		for n in chans[fs[i]]:
+			names[n] = true
+	var worst := -1.0
+	var worst_i := -1
+	for i in range(i0 + 1, i1):
+		var t := float(int(fs[i]) - int(fs[i0])) / float(int(fs[i1]) - int(fs[i0]))
+		var err := 0.0
+		for n in names:   # 某帧没登记这个通道 = 那一帧它是 0（和烘焙的语义一致）
+			var guess := lerpf(float(a.get(n, 0.0)), float(b.get(n, 0.0)), t)
+			err = maxf(err, absf(guess - float((chans[fs[i]] as Dictionary).get(n, 0.0))))
+		if err > worst:
+			worst = err
+			worst_i = i
+	if worst > tol and worst_i > i0:
+		keep[fs[worst_i]] = true
+		_split_ch(chans, fs, i0, worst_i, tol, keep)
+		_split_ch(chans, fs, worst_i, i1, tol, keep)
+
+
 # ---------------------------------------------------------------- 工程存读（JSON）
 
 static func project_path(anim_name: String) -> String:

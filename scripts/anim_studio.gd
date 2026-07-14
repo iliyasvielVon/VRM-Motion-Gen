@@ -31,9 +31,14 @@ const MOCAP_DIR := "res://animations/mocap"
 const MOCAP_PORT := 9977         # tools/mocap/capture.py --camera 往这个口喷关键点
 const LIVE_SMOOTH := 0.6         # 实时动补的平滑（抖动全靠它压，但太大会拖泥带水）
 const IMPORT_SMOOTH := 0.35      # 离线导入可以少平滑一点，细节留多些
+## 表情通道的平滑必须比骨骼小一整档：一次眨眼总共只有三四帧，按骨骼那档平滑
+## 会被直接磨平——眼睛永远闭不上（实时和视频导入都一样）。
+const LIVE_SHAPE_SMOOTH := 0.2
+const IMPORT_SHAPE_SMOOTH := 0.1
 ## 抽稀阈值（度）。定 8 而不是更小：动补数据本身就有 5~10° 的逐帧噪声，
 ## 阈值压到噪声地板以下的话每一帧都会被判为「转折点」，一帧也删不掉。
 const DECIMATE_DEG := 8.0
+const DECIMATE_SHAPE_TOL := 0.05   # 表情抽稀阈值（通道值 0~1 的线性插值偏差）
 
 enum Drag { NONE, AIM, RING }
 
@@ -516,7 +521,7 @@ func _poll_mocap() -> void:
 		var r := _mocap.solve(frame, _last_solved)   # 手/脸丢帧时保持上一帧，别弹回静止
 		if r.is_empty():
 			continue
-		_last_solved = Mocap.smooth(_last_solved, r, LIVE_SMOOTH)
+		_last_solved = Mocap.smooth(_last_solved, r, LIVE_SMOOTH, LIVE_SHAPE_SMOOTH)
 		got = true
 	if got:
 		_pose = (_last_solved["bones"] as Dictionary).duplicate()
@@ -586,7 +591,7 @@ func _import_mocap() -> void:
 		if r.is_empty():
 			miss += 1
 			continue                     # 这一帧没认出人，跳过（补间会把这个洞连起来）
-		r = Mocap.smooth(prev, r, IMPORT_SMOOTH)
+		r = Mocap.smooth(prev, r, IMPORT_SMOOTH, IMPORT_SHAPE_SMOOTH)
 		prev = r
 		_keys[i] = (r["bones"] as Dictionary).duplicate()
 		if not (r["shapes"] as Dictionary).is_empty():
@@ -609,20 +614,24 @@ func _decimate() -> void:
 	if before < 3:
 		_show_hint("关键帧太少，不用抽稀")
 		return
-	_keys = AnimBaker.decimate(_keys, DECIMATE_DEG)
-	var kept := {}
+	var orig := _keys
+	var kept_keys := AnimBaker.decimate(_keys, DECIMATE_DEG)
+	# 表情单独抽转折点：眨眼时骨骼一动不动，跟着骨骼的转折点走会把眨眼整段抽掉
+	var kept_shapes := AnimBaker.decimate_channels(_shapes, DECIMATE_SHAPE_TOL)
+	for f in kept_shapes:
+		if not kept_keys.has(f) and orig.has(f):
+			kept_keys[f] = orig[f]       # 表情转折帧在时间轴上也得有个关键帧站着
+	_keys = kept_keys
+	_shapes = kept_shapes
 	var kept_roots := {}
 	for f in _keys:
-		if _shapes.has(f):
-			kept[f] = _shapes[f]
 		if _roots.has(f):
 			kept_roots[f] = _roots[f]
-	_shapes = kept
 	_roots = kept_roots
 	_spans.clear()                       # 抽稀后全线性补间
 	_goto_frame(_playhead)
-	_show_hint("抽稀：%d → %d 个关键帧（骨骼偏差控制在 %.0f° 以内），现在可以手改了"
-		% [before, _keys.size(), DECIMATE_DEG])
+	_show_hint("抽稀：%d → %d 个关键帧（骨骼 %.0f°、表情 %.2f 以内），现在可以手改了"
+		% [before, _keys.size(), DECIMATE_DEG, DECIMATE_SHAPE_TOL])
 
 
 # ---------------------------------------------------------------- 关键帧 / 补间

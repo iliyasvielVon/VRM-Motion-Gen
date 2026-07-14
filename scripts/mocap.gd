@@ -51,6 +51,27 @@ const FINGER_CHAIN := {
 	"LittleProximal": [17, 18], "LittleIntermediate": [18, 19], "LittleDistal": [19, 20],
 }
 
+## 关键点可见度低于这个值就当没看见。MediaPipe 对被遮挡/出画/和背景同色的关节照样
+## 硬给一个瞎猜的坐标，只是 visibility 很低——同色裤腿最典型，腿会整段乱飘。
+## 低可见度的目标直接作废，solve 的 hold 机制会让那根骨头保持上一帧。
+const VIS_MIN := 0.5
+
+## 每个身体目标依赖哪些关键点：任何一个看不清，这个目标整个作废（保持上一帧）
+const TARGET_VIS := {
+	"Hips": [SHOULDER_L, SHOULDER_R, HIP_L, HIP_R],
+	"Spine": [SHOULDER_L, SHOULDER_R, HIP_L, HIP_R],
+	"Chest": [SHOULDER_L, SHOULDER_R, HIP_L, HIP_R],
+	"UpperChest": [SHOULDER_L, SHOULDER_R, HIP_L, HIP_R],
+	"Neck": [EAR_L, EAR_R, SHOULDER_L, SHOULDER_R],
+	"Head": [EAR_L, EAR_R, NOSE],
+	"LeftUpperArm": [SHOULDER_L, ELBOW_L], "LeftLowerArm": [ELBOW_L, WRIST_L],
+	"RightUpperArm": [SHOULDER_R, ELBOW_R], "RightLowerArm": [ELBOW_R, WRIST_R],
+	"LeftUpperLeg": [HIP_L, KNEE_L], "LeftLowerLeg": [KNEE_L, ANKLE_L],
+	"LeftFoot": [ANKLE_L, FOOT_L],
+	"RightUpperLeg": [HIP_R, KNEE_R], "RightLowerLeg": [KNEE_R, ANKLE_R],
+	"RightFoot": [ANKLE_R, FOOT_R],
+}
+
 ## VRoid 表情形变 <- MediaPipe(ARKit) blendshape 的加权和。
 ## 只驱动具体通道（EYE_/MTH_/BRW_），不碰 Fcl_ALL_*——那些是复合形变，
 ## 叠上来会和具体通道打架（嘴角被拉两次）。
@@ -68,6 +89,13 @@ const SHAPE_MAP := {
 	"Fcl_BRW_Surprised": {"browInnerUp": 1.0},
 	"Fcl_BRW_Angry": {"browDownLeft": 0.5, "browDownRight": 0.5},
 	"Fcl_BRW_Fun": {"browOuterUpLeft": 0.5, "browOuterUpRight": 0.5},
+}
+
+## ARKit 原始分数 → 0~1 的拉伸区间。MediaPipe 的眨眼分数根本到不了 1.0：
+## 实测闭眼峰值 ~0.5、睁眼基线 ~0.1。不拉伸的话模型永远只会半眯眼，「闭眼」无从谈起。
+const SHAPE_INPUT_REMAP := {
+	"eyeBlinkLeft": [0.12, 0.5],
+	"eyeBlinkRight": [0.12, 0.5],
 }
 
 var solver: PoseSolver     # 正向运动学 / 瞄准求解器（和全身 IK 共用同一套）
@@ -151,6 +179,13 @@ func targets(frame: Dictionary) -> Dictionary:
 		"RightLowerLeg": p[ANKLE_R] - p[KNEE_R],
 		"RightFoot": p[FOOT_R] - p[ANKLE_R],
 	}
+	# 可见度门控：看不清的关节别拿瞎猜的坐标去摆骨头（老格式的关键点没有 vis 字段 → 全可见）
+	var vis := _vis(pose)
+	for bname in TARGET_VIS:
+		for idx in TARGET_VIS[bname]:
+			if vis[idx] < VIS_MIN:
+				out.erase(bname)
+				break
 	_add_hand(out, "Left", frame.get("lh"))
 	_add_hand(out, "Right", frame.get("rh"))
 	return out
@@ -211,6 +246,14 @@ static func _points(raw: Array) -> Array[Vector3]:
 	return out
 
 
+## 每个关键点的可见度（老格式只有 [x,y,z] → 视为全可见，行为跟以前一样）
+static func _vis(raw: Array) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for v in raw:
+		out.append(1.0 if (v as Array).size() < 4 else float(v[3]))
+	return out
+
+
 ## ARKit blendshape → VRoid Fcl_* 形变值
 func _shapes(bs) -> Dictionary:
 	var out := {}
@@ -219,7 +262,11 @@ func _shapes(bs) -> Dictionary:
 	for vroid in SHAPE_MAP:
 		var v := 0.0
 		for arkit in SHAPE_MAP[vroid]:
-			v += float(bs.get(arkit, 0.0)) * float(SHAPE_MAP[vroid][arkit])
+			var raw := float(bs.get(arkit, 0.0))
+			if SHAPE_INPUT_REMAP.has(arkit):
+				var r: Array = SHAPE_INPUT_REMAP[arkit]
+				raw = clampf((raw - float(r[0])) / (float(r[1]) - float(r[0])), 0.0, 1.0)
+			v += raw * float(SHAPE_MAP[vroid][arkit])
 		if v > 0.01:
 			out[vroid] = clampf(v, 0.0, 1.0)
 	return out
@@ -234,9 +281,14 @@ func global_dirs(local_rots: Dictionary) -> Dictionary:
 # ---------------------------------------------------------------- 平滑
 
 ## 一阶低通：新值往旧值那边拉 amount（0 = 不平滑，0.8 = 很粘）。抖动全靠它压。
-static func smooth(prev: Dictionary, cur: Dictionary, amount: float) -> Dictionary:
+## shape_amount = 表情通道单独的平滑量，必须比骨骼小得多：一次眨眼总共只有三四帧，
+## 按骨骼那档（0.6）平滑会被直接磨平，眼睛永远闭不上。不传就跟骨骼同档。
+static func smooth(prev: Dictionary, cur: Dictionary, amount: float,
+		shape_amount := -1.0) -> Dictionary:
 	if prev.is_empty() or amount <= 0.0:
 		return cur
+	if shape_amount < 0.0:
+		shape_amount = amount
 	var out := {"bones": {}, "shapes": {}}
 	var pb: Dictionary = prev.get("bones", {})
 	for b in cur["bones"]:
@@ -245,5 +297,5 @@ static func smooth(prev: Dictionary, cur: Dictionary, amount: float) -> Dictiona
 	var ps: Dictionary = prev.get("shapes", {})
 	for s in cur["shapes"]:
 		var v: float = cur["shapes"][s]
-		out["shapes"][s] = lerpf(ps[s], v, 1.0 - amount) if ps.has(s) else v
+		out["shapes"][s] = lerpf(ps[s], v, 1.0 - shape_amount) if ps.has(s) else v
 	return out

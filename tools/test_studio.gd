@@ -72,6 +72,18 @@ func _test_bake_frames() -> void:
 	_ok(f.size() == 12 and f[0] == 0 and f[1] == 1 and f[10] == 10 and f[11] == 20,
 		"缓动区间逐帧、线性区间只留端点")
 
+	# 表情抽稀：一次眨眼 = 常值序列里的一个尖峰，抽完稀尖峰必须活着
+	print("\n[表情抽稀]")
+	var ch := {}
+	for i in range(21):
+		ch[i] = {"Fcl_EYE_Close_L": 0.0}
+	ch[10] = {"Fcl_EYE_Close_L": 1.0}
+	var kept := AnimBaker.decimate_channels(ch, 0.05)
+	_ok(kept.has(10), "闭眼峰值那一帧留下来了")
+	_ok(kept.has(9) and kept.has(11),
+		"眨眼的起落帧也留下来了（不然补间会把一次眨眼拖成半秒的慢闭眼）")
+	_ok(kept.size() <= 6, "其余帧被抽掉（21 帧只留 %d 帧）" % kept.size())
+
 
 func _test_topology() -> void:
 	print("\n[骨架拓扑]")
