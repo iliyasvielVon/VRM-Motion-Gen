@@ -30,6 +30,7 @@ import json
 import shutil
 import socket
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -169,10 +170,11 @@ def run_phone(args, landmarker, sock, addr, frames):
     t0 = time.time()
     state = {"n": 0}
 
-    def on_frame(jpeg: bytes):
+    def on_frame(_conn_id, jpeg):
         bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if bgr is None:
             return
+        bgr = cv2.flip(bgr, 1)   # 手机端发的是真实朝向；单相机 = 镜子手感，电脑端补翻转
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = landmarker.detect_for_video(image, int((time.time() - t0) * 1000))
@@ -197,6 +199,133 @@ def pack(result) -> dict:
     }
 
 
+def run_rig(args, sock, addr):
+    """多相机融合：每个源一个线程（各自一套 MediaPipe 实例），rig 负责标定+融合，
+    输出仍是单路 UDP——Godot 那头完全不用知道后面有几台相机。"""
+    import numpy as np
+
+    from rig import Rig
+
+    rig = Rig(on_event=lambda m: print("[融合] " + m, flush=True))
+    previews = {}      # cam_id -> 最新标注帧。imshow 只能在主线程画，工作线程只存不画
+    plock = threading.Lock()
+    stop = threading.Event()
+    t0 = time.time()
+    ts_last = {}       # MediaPipe VIDEO 模式要求时间戳严格递增（按相机各算各的）
+
+    def eat(cam_id, bgr, landmarker):
+        ms = max(int((time.time() - t0) * 1000), ts_last.get(cam_id, -1) + 1)
+        ts_last[cam_id] = ms
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        result = landmarker.detect_for_video(
+            mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), ms)
+        rig.push(cam_id, pack(result))
+        if not args.no_preview:
+            draw_preview(bgr, result)
+            cv2.putText(bgr, cam_id, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 220, 255), 2)
+            with plock:
+                previews[cam_id] = bgr
+
+    def cam_worker(cam_id, source):
+        landmarker = make_landmarker()
+        while not stop.is_set():
+            cap = cv2.VideoCapture(source)
+            if cap.isOpened():
+                print("[融合] %s 已打开" % cam_id, flush=True)
+                while not stop.is_set():
+                    ok, bgr = cap.read()
+                    if not ok:
+                        break
+                    eat(cam_id, bgr, landmarker)
+                cap.release()
+                rig.offline(cam_id, "读不到画面")
+                with plock:
+                    previews.pop(cam_id, None)
+            time.sleep(3.0)   # 掉线的本地源每 3 秒试着重连；回来后按新相机重新标定
+
+    tokens = []
+    for tok in args.rig:
+        tokens += [t.strip() for t in tok.split(",") if t.strip()]
+    n_src = 0
+    want_phone = False
+    for tok in tokens:
+        if tok == "phone":
+            want_phone = True
+        else:
+            src = int(tok) if tok.isdigit() else tok
+            threading.Thread(target=cam_worker,
+                             args=("cam%s" % tok if tok.isdigit() else "url%d" % n_src, src),
+                             daemon=True).start()
+            n_src += 1
+
+    if want_phone:
+        import phone
+
+        marks = {}
+
+        def phone_frame(conn_id, jpeg):
+            bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+            if bgr is None:
+                return
+            if conn_id not in marks:
+                marks[conn_id] = make_landmarker()
+            eat(conn_id, bgr, marks[conn_id])   # 融合模式不镜像：要的是真实朝向
+
+        def phone_close(conn_id):
+            rig.offline(conn_id, "手机断开")
+            with plock:
+                previews.pop(conn_id, None)
+
+        phone.serve_threaded(phone_frame, on_close=phone_close)
+
+    print("[融合] 多相机模式：%d 个本地/URL 源%s" % (n_src, "，手机可随时加入" if want_phone else ""),
+          flush=True)
+    print("[融合] 第一台看到人的相机 = 参考相机（定义坐标系）。"
+          "新相机要标定：站到多台相机都拍得到的位置动一动。", flush=True)
+
+    frames = []
+    last_line = 0.0
+    try:
+        while True:
+            tick = time.time()
+            fused, status = rig.fuse()
+            if fused is not None:
+                fused["rig"] = status
+                sock.sendto(json.dumps(fused, separators=(",", ":")).encode("utf-8"), addr)
+                if args.out:
+                    rec = dict(fused)
+                    rec.pop("rig", None)
+                    frames.append(rec)
+            if not args.no_preview:
+                with plock:
+                    shown = dict(previews)
+                for cid, im in shown.items():
+                    cv2.imshow(cid, im)
+                if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                    break
+            if status and tick - last_line > 3.0:
+                last_line = tick
+                print("[融合] " + " | ".join(_rig_line(e) for e in status), flush=True)
+            time.sleep(max(0.0, 1.0 / 30.0 - (time.time() - tick)))
+    except KeyboardInterrupt:
+        pass
+    stop.set()
+    cv2.destroyAllWindows()
+    finish(args, frames, 30.0, "rig")
+
+
+def _rig_line(e):
+    if e["st"] == "on":
+        if e.get("ref"):
+            return "%s 参考相机" % e["id"]
+        if e.get("rms"):
+            return "%s 已融合(残差%.1fcm)" % (e["id"], e["rms"] * 100)
+        return "%s 已融合" % e["id"]
+    if e["st"] == "calib":
+        return "%s 标定中 %d%%" % (e["id"], int(e.get("prog", 0) * 100))
+    return "%s 等人入镜" % e["id"]
+
+
 def main():
     ap = argparse.ArgumentParser(description="动作工房动补采集")
     src = ap.add_mutually_exclusive_group(required=True)
@@ -205,13 +334,16 @@ def main():
     src.add_argument("--phone", action="store_true",
                      help="拿手机当摄像头：手机浏览器打开网页即可，不用装 App")
     src.add_argument("--url", help="网络摄像头流地址（DroidCam / IP Webcam / RTSP 都行）")
+    src.add_argument("--rig", action="append",
+                     help="多相机融合，逗号分隔：数字=本地摄像头，phone=手机（可随时加入/退出），"
+                          "其余按流地址。例：--rig 0,phone")
     ap.add_argument("--out", help="存成 animations/mocap/<名>.mocap.json")
     ap.add_argument("--udp", default="127.0.0.1:9977", help="实时模式喷给 Godot 的地址")
     ap.add_argument("--fps", type=float, default=30.0, help="摄像头模式的目标帧率")
     ap.add_argument("--no-preview", action="store_true", help="不开预览窗口")
     args = ap.parse_args()
 
-    live = args.camera is not None or args.phone or args.url is not None
+    live = args.camera is not None or args.phone or args.url is not None or args.rig
 
     sock = None
     addr = None
@@ -223,6 +355,10 @@ def main():
 
     landmarker = make_landmarker()
     frames = []
+
+    if args.rig:
+        run_rig(args, sock, addr)
+        return
 
     if args.phone:
         try:

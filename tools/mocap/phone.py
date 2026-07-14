@@ -86,11 +86,10 @@ function stop(){ sending=false; go.textContent='开始';
 
 function pump(){
   if (!sending) return;
-  // 前摄要镜像：抬右手，电脑上的模型也抬右手（跟 --camera 模式一致）
-  ctx.save();
-  if (facing==='user'){ ctx.translate(c.width,0); ctx.scale(-1,1); }
+  // 发送的画面永远是真实朝向（不镜像）：多相机融合要做刚体对齐，镜像过的骨架
+  // 是「反射」不是「旋转」，和别的相机永远拼不上（Kabsch 残差爆表会拒收）。
+  // 单相机模式的镜子手感由电脑那头统一翻转，预览里的镜像只是 CSS。
   ctx.drawImage(v,0,0,c.width,c.height);
-  ctx.restore();
   c.toBlob(b=>{
     if (b && ws && ws.readyState===1 && ws.bufferedAmount < 200000){
       b.arrayBuffer().then(a=>ws.send(a));
@@ -156,25 +155,33 @@ def ensure_cert(ip: str) -> ssl.SSLContext:
     return ctx
 
 
-def serve(on_frame, port: int = 8443) -> None:
-    """开 HTTPS 服务。on_frame(jpeg_bytes) 每收到一帧调一次（在事件循环线程里，别做重活以外的阻塞）"""
+def serve(on_frame, port: int = 8443, on_close=None, handle_signals: bool = True) -> None:
+    """开 HTTPS 服务。可以有任意多台手机同时连（多相机融合的「中途加入」就是从这儿进来的）。
+
+    on_frame(conn_id, jpeg_bytes)：每收到一帧调一次，conn_id 形如 "phone1"/"phone2"。
+    on_close(conn_id)：手机断开时调一次（融合那头拿它做「下线即移除」）。"""
     from aiohttp import WSMsgType, web
 
     ip = lan_ip()
+    counter = {"n": 0}
 
     async def index(_req):
         return web.Response(text=PAGE, content_type="text/html")
 
     async def ws_handler(req):
+        counter["n"] += 1
+        cid = "phone%d" % counter["n"]
         ws = web.WebSocketResponse(max_msg_size=8 << 20)
         await ws.prepare(req)
-        print("手机连上了：%s" % req.remote)
+        print("手机 %s 连上了：%s" % (cid, req.remote))
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                on_frame(msg.data)
+                on_frame(cid, msg.data)
             elif msg.type == WSMsgType.ERROR:
                 break
-        print("手机断开了")
+        print("手机 %s 断开了" % cid)
+        if on_close is not None:
+            on_close(cid)
         return ws
 
     app = web.Application()
@@ -191,4 +198,11 @@ def serve(on_frame, port: int = 8443) -> None:
     print("=" * 58 + "\n")
 
     web.run_app(app, host="0.0.0.0", port=port, ssl_context=ensure_cert(ip),
-                print=None, access_log=None)
+                print=None, access_log=None, handle_signals=handle_signals)
+
+
+def serve_threaded(on_frame, on_close=None, port: int = 8443) -> None:
+    """后台线程里跑手机服务（多相机融合模式用：主线程要留给融合循环和预览窗口）"""
+    import threading
+
+    threading.Thread(target=serve, args=(on_frame, port, on_close, False), daemon=True).start()

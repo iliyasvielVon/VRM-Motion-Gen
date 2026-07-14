@@ -71,6 +71,7 @@ var _recording := false
 var _rec_t := 0.0
 var _rec_last := -1
 var _last_solved := {}           # 上一帧解算结果（平滑用）
+var _rig_line := ""              # 多相机融合的状态行（变化才刷提示，别刷屏）
 
 # ---- 编辑状态
 var _pose := {}                  # 当前工作姿势（骨骼名 -> 局部四元数）
@@ -518,6 +519,8 @@ func _poll_mocap() -> void:
 		var frame = JSON.parse_string(raw)
 		if not (frame is Dictionary):
 			continue
+		if (frame as Dictionary).has("rig"):
+			_show_rig_status(frame["rig"])   # capture.py --rig 会随包带上各相机的标定/融合状态
 		var r := _mocap.solve(frame, _last_solved)   # 手/脸丢帧时保持上一帧，别弹回静止
 		if r.is_empty():
 			continue
@@ -527,6 +530,33 @@ func _poll_mocap() -> void:
 		_pose = (_last_solved["bones"] as Dictionary).duplicate()
 		_shape_pose = (_last_solved["shapes"] as Dictionary).duplicate()
 		_refresh_sliders()
+
+
+## 多相机融合的状态播报：参考相机 / 标定中 xx% / 已融合（残差）/ 等人入镜
+func _show_rig_status(rig) -> void:
+	if not (rig is Array):
+		return
+	var parts := PackedStringArray()
+	for e in rig:
+		if not (e is Dictionary):
+			continue
+		var id := str((e as Dictionary).get("id", "?"))
+		match str((e as Dictionary).get("st", "")):
+			"on":
+				if (e as Dictionary).get("ref", false):
+					parts.append(id + " ✓参考")
+				elif (e as Dictionary).has("rms"):
+					parts.append("%s ✓已融合(残差%.1fcm)" % [id, float(e["rms"]) * 100.0])
+				else:
+					parts.append(id + " ✓已融合")
+			"calib":
+				parts.append("%s 标定中 %d%%" % [id, int(float((e as Dictionary).get("prog", 0.0)) * 100.0)])
+			_:
+				parts.append(id + " 等人入镜")
+	var line := "多相机：" + " · ".join(parts)
+	if line != _rig_line:
+		_rig_line = line
+		_show_hint(line)
 
 
 ## 录制：实时姿势按真实时间落成逐帧关键帧，录到总帧数为止
