@@ -52,6 +52,22 @@ RECAL_RMS = 0.14      # 已融合相机的滚动残差中位数超过它 → 判
 RECAL_WIN = 60
 VIEW_LOCAL = np.array([0.0, 0.0, -1.0])   # 相机在自己坐标系里的视线方向
 
+# ---- 融合稳定化（多目抖动的三个来源，各配一味药）----
+## ① 每台相机进门先做一阶低通：0 = 不滤，0.5 = 一半旧值。压掉单机检测抖动，
+##    别让它进融合再和别家的抖动打架。
+SMOOTH_IN = 0.5
+## ② 权重按数据年龄平滑衰减到 0（而不是过了 FRESH_S 一刀切掉整台相机）：
+##    慢相机（手机 ~12fps）两次更新之间影响力逐渐让位，更新时平滑接回——
+##    否则输出会以慢相机的帧率打摆，「A 单独」和「A+B 混合」之间反复横跳。
+## ③ 融合输出过 One-Euro 滤波：静止时截止频率压到 OE_MIN_CUTOFF（死稳），
+##    动得快时按速度自动抬高截止（不拖影）。动补界的标准答案。
+OE_MIN_CUTOFF = 1.0   # Hz，静止时的截止频率——越小越稳
+OE_BETA = 1.2         # 速度每 1 m/s 抬高这么多 Hz
+OE_D_CUTOFF = 1.0     # 速度估计自身的截止频率
+## ④ 手/表情的来源相机要粘滞：挑战者的可见度要比现任高出这么多才换人，
+##    不然可见度一抖，手就在两台相机的版本之间闪切。
+SRC_HYSTERESIS = 0.15
+
 
 def _np_pose(pose):
     pts = np.zeros((POSE_N, 3))
@@ -127,6 +143,8 @@ class Cam:
         self.t = 0.0
         self.buf = deque(maxlen=120)   # 标定对应点 [(A_centered, B_centered), ...]
         self.resid = deque(maxlen=RECAL_WIN)
+        self.pts_f = None              # 进门低通后的关键点 / 可见度（融合用它，标定用原始）
+        self.vis_f = None
 
 
 class Rig:
@@ -137,6 +155,10 @@ class Rig:
         # 离线视频模式 live=False：不做「断流即移除」和「被挪动看门狗」——
         # 录像里人走出某台相机几秒是常事，相机本身根本不会动
         self._live = live
+        self._oe = None                # One-Euro 状态 (x, dx, t)
+        self._hand_src = {}            # "lh"/"rh" -> 现任来源相机（粘滞）
+        self._hand_f = {}              # "lh"/"rh" -> 低通后的手部点云
+        self._bs_src = None
 
     # ---------------------------------------------------------------- 输入
 
@@ -147,8 +169,16 @@ class Rig:
             if cam is None:
                 cam = self.cams[cam_id] = Cam(cam_id)
                 self._event("相机 %s 接入，等待画面里出现人" % cam_id)
+            now = time.monotonic() if t is None else t
+            if frame.get("pose"):
+                pts, vis = _np_pose(frame["pose"])
+                if cam.pts_f is not None and now - cam.t < FRESH_S:
+                    cam.pts_f = SMOOTH_IN * cam.pts_f + (1.0 - SMOOTH_IN) * pts
+                    cam.vis_f = SMOOTH_IN * cam.vis_f + (1.0 - SMOOTH_IN) * vis
+                else:
+                    cam.pts_f, cam.vis_f = pts, vis   # 断流后回来别跨着洞平滑
             cam.frame = frame
-            cam.t = time.monotonic() if t is None else t
+            cam.t = now
 
     def offline(self, cam_id, reason="断开"):
         with self._lock:
@@ -194,7 +224,7 @@ class Rig:
                 break
 
         on = [c for c in fresh if c.state == "on"]
-        fused = self._fuse_pose(on) if on else None
+        fused = self._fuse_pose(on, now) if on else None
 
         if fused is not None:
             f_pts, f_vis = fused
@@ -209,30 +239,54 @@ class Rig:
             if self._live:
                 self._watch_moved(on, fused)
 
-        return self._pack(fused, on), self._status()
+        return self._pack(fused, on, now), self._status()
 
-    ## 各向异性加权融合：每台相机沿自己视线方向（深度）只有 W_DEPTH 的话语权
-    def _fuse_pose(self, on):
+    ## 各向异性加权融合：每台相机沿自己视线方向（深度）只有 W_DEPTH 的话语权。
+    ## 用的是进门低通后的点；权重再乘「数据年龄」的平滑衰减——慢相机两次更新之间
+    ## 逐渐让位而不是一刀踢出，这是多目抖动的头号来源。
+    def _fuse_pose(self, on, now):
         pts = np.zeros((POSE_N, 3))
         vis = np.zeros(POSE_N)
         M = np.zeros((POSE_N, 3, 3))
         b = np.zeros((POSE_N, 3))
         for cam in on:
-            a_pts, a_vis = _np_pose(cam.frame["pose"])
-            P = a_pts @ cam.R.T                       # 旋进参考坐标系
+            if cam.pts_f is None:
+                continue
+            age_w = max(0.05, 1.0 - (now - cam.t) / FRESH_S)
+            P = cam.pts_f @ cam.R.T                   # 旋进参考坐标系
             d = cam.R @ VIEW_LOCAL
             W = (np.eye(3) - np.outer(d, d)) + W_DEPTH * np.outer(d, d)
             for j in range(POSE_N):
-                w = a_vis[j]
-                if w < 0.15:
+                w = cam.vis_f[j] * age_w
+                if w < 0.10:
                     continue                          # 这台相机看不清的关节不投票
                 M[j] += w * W
                 b[j] += w * (W @ P[j])
-                vis[j] = max(vis[j], a_vis[j])        # 任何一台看得清就算看得清
+                vis[j] = max(vis[j], cam.vis_f[j])    # 任何一台看得清就算看得清
         for j in range(POSE_N):
             if vis[j] > 0.0:
                 pts[j] = np.linalg.solve(M[j], b[j])
         return pts, vis
+
+    ## One-Euro 输出滤波：静止时截止压到 OE_MIN_CUTOFF，速度快时按 OE_BETA 抬高。
+    ## 只滤对外输出——标定/看门狗用滤波前的融合值，不然滤波的滞后会被标进 R 里。
+    def _one_euro(self, pts, now):
+        def alpha(dt, cutoff):
+            tau = 1.0 / (2.0 * np.pi * cutoff)
+            return dt / (dt + tau)
+        if self._oe is None or now - self._oe[2] > 0.5:
+            self._oe = (pts.copy(), np.zeros_like(pts), now)
+            return pts
+        x_prev, dx_prev, t_prev = self._oe
+        dt = max(1e-3, now - t_prev)
+        dx = (pts - x_prev) / dt
+        a_d = alpha(dt, OE_D_CUTOFF)
+        dx_f = a_d * dx + (1.0 - a_d) * dx_prev
+        speed = np.linalg.norm(dx_f, axis=1)          # 每个关节自己的速度定自己的截止
+        a = np.array([alpha(dt, OE_MIN_CUTOFF + OE_BETA * v) for v in speed])[:, None]
+        x_f = a * pts + (1.0 - a) * x_prev
+        self._oe = (x_f, dx_f, now)
+        return x_f
 
     ## 标定：攒（本相机骨架, 融合骨架）对应点，够数就修剪 Kabsch，残差达标才启用
     def _collect(self, cam, f_pts, f_vis):
@@ -277,7 +331,10 @@ class Rig:
             A = a_pts[idx] - a_pts[idx].mean(axis=0)
             B = f_pts[idx] - f_pts[idx].mean(axis=0)
             cam.resid.append(float(np.sqrt(np.mean(np.sum((A @ cam.R.T - B) ** 2, axis=1)))))
-            if len(cam.resid) >= RECAL_WIN and float(np.median(cam.resid)) > RECAL_RMS:
+            # 阈值取「全局下限」和「自己标定残差的 1.6 倍」的较大者：残差天生贴着
+            # RECAL_RMS 晃的相机不该反复 退回→重标→回来，那个循环本身就是巨型抖动
+            demote_at = max(RECAL_RMS, 1.6 * cam.rms) if cam.rms else RECAL_RMS
+            if len(cam.resid) >= RECAL_WIN and float(np.median(cam.resid)) > demote_at:
                 flagged.append(cam)
         if flagged and len(non_ref) >= 2 and len(flagged) > len(non_ref) // 2:
             self._event("多台相机残差同时飙高——更像是参考相机被挪动了，建议重启重新标定")
@@ -294,43 +351,60 @@ class Rig:
 
     # ---------------------------------------------------------------- 输出
 
-    def _pack(self, fused, on):
+    def _pack(self, fused, on, now):
         if fused is None:
             return None
         f_pts, f_vis = fused
+        f_pts = self._one_euro(f_pts, now)
         pose = [[round(float(p[0]), 4), round(float(p[1]), 4), round(float(p[2]), 4),
                  round(float(v), 3)] for p, v in zip(f_pts, f_vis)]
         return {"pose": pose,
-                "lh": self._pick_hand(on, "lh", WRIST_L),
-                "rh": self._pick_hand(on, "rh", WRIST_R),
+                "lh": self._pick_hand(on, "lh", WRIST_L, now),
+                "rh": self._pick_hand(on, "rh", WRIST_R, now),
                 "bs": self._pick_bs(on)}
 
     ## 手不做平均：侧后方相机可能把左右手认反，平均只会掺垃圾。
-    ## 每只手挑「腕部看得最清」的那台相机，整只用它的（旋进参考坐标系）。
-    def _pick_hand(self, on, key, wrist_idx):
-        best, best_vis = None, 0.0
+    ## 每只手挑「腕部看得最清」的那台相机整只用；来源**粘滞**（挑战者要高出
+    ## SRC_HYSTERESIS 才换人，不然可见度一抖手就在两个版本之间闪切），换人时重置低通。
+    def _pick_hand(self, on, key, wrist_idx, now):
+        cand = {}
         for cam in on:
             hand = cam.frame.get(key)
-            if not hand:
-                continue
-            _, a_vis = _np_pose(cam.frame["pose"])
-            if a_vis[wrist_idx] > best_vis:
-                best_vis, best = a_vis[wrist_idx], (cam, hand)
-        if best is None:
+            if hand and cam.vis_f is not None:
+                cand[cam.id] = (float(cam.vis_f[wrist_idx]), cam, hand)
+        if not cand:
+            self._hand_src.pop(key, None)
+            self._hand_f.pop(key, None)
             return None
-        cam, hand = best
+        best_id = max(cand, key=lambda c: cand[c][0])
+        cur = self._hand_src.get(key)
+        if cur in cand and cand[best_id][0] - cand[cur][0] < SRC_HYSTERESIS:
+            best_id = cur                             # 现任还行，不换
+        if best_id != cur:
+            self._hand_f.pop(key, None)               # 换人：别跨着来源平滑
+            self._hand_src[key] = best_id
+        _, cam, hand = cand[best_id]
         H = np.array([p[:3] for p in hand]) @ cam.R.T
+        prev = self._hand_f.get(key)
+        if prev is not None and prev.shape == H.shape:
+            H = 0.5 * prev + 0.5 * H
+        self._hand_f[key] = H
         return [[round(float(x), 4) for x in p] for p in H]
 
-    ## 表情挑「鼻尖看得最清」的那台相机（= 最正对脸的那台）
+    ## 表情挑「鼻尖看得最清」的那台相机（= 最正对脸的那台），同样粘滞
     def _pick_bs(self, on):
-        best, best_vis = None, 0.0
+        cand = {}
         for cam in on:
-            if cam.frame.get("bs"):
-                _, a_vis = _np_pose(cam.frame["pose"])
-                if a_vis[NOSE] > best_vis:
-                    best_vis, best = a_vis[NOSE], cam.frame["bs"]
-        return best
+            if cam.frame.get("bs") and cam.vis_f is not None:
+                cand[cam.id] = (float(cam.vis_f[NOSE]), cam.frame["bs"])
+        if not cand:
+            self._bs_src = None
+            return None
+        best_id = max(cand, key=lambda c: cand[c][0])
+        if self._bs_src in cand and cand[best_id][0] - cand[self._bs_src][0] < SRC_HYSTERESIS:
+            best_id = self._bs_src
+        self._bs_src = best_id
+        return cand[best_id][1]
 
     def _status(self):
         out = []

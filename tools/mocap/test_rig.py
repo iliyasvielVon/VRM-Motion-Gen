@@ -95,14 +95,19 @@ def main():
     ok(any("标定完成" in e for e in events), "屏幕播报了「标定完成（残差 x cm）」")
 
     print("\n[3. 融合精度：侧面相机的图像平面补正面相机的深度]")
+    # 每个姿势保持 5 tick、只在第 5 tick 采样：量的是空间融合精度。
+    # 逐 tick 换姿势再逐 tick 采样会把输出滤波的 1~2 帧滞后也记成误差——
+    # 滞后有自己的断言（第 7 节的突变追赶），别混在一起量。
     e_single, e_fused = [], []
-    for k in range(60):
+    for k in range(180):
         t += TICK
-        f_truth = truth[k % len(truth)]
+        f_truth = truth[(k // 5) % len(truth)]
         va = make_view(f_truth, np.eye(3), rng)
         rig.push("A", va, t)
         rig.push("B", make_view(f_truth, r_b, rng), t)
         fused, _ = rig.fuse(t)
+        if k % 5 != 4:
+            continue
         fp = np.array([p[:3] for p in fused["pose"]])
         fp -= fp.mean(axis=0)
         ap = np.array([p[:3] for p in va["pose"]])
@@ -134,6 +139,46 @@ def main():
     ok(st_c is not None and st_c["st"] != "on",
        "镜像相机 C 一直没被启用（det 判据直接识破反射）")
     ok(any("镜像" in e for e in events), "屏幕播报了「画面是镜像的，拒收」")
+
+    print("\n[7. 稳定性：多目不许比单目更抖（用户实测抖动的三个来源，各钉一条）]")
+    rig2 = Rig(on_event=lambda m: None)
+    t2 = 1000.0
+    static = truth[0]
+    for k in range(CAL_FRAMES + 20):                 # 先把双机标定好
+        t2 += TICK
+        rig2.push("A", make_view(static, np.eye(3), rng), t2)
+        rig2.push("B", make_view(static, r_b, rng), t2)
+        rig2.fuse(t2)
+    # 静止 + 满检测噪声 + B 只有 10fps（每 3 tick 一帧）：量输出的帧间跳动
+    deltas = []
+    prev = None
+    for k in range(90):
+        t2 += TICK
+        rig2.push("A", make_view(static, np.eye(3), rng), t2)
+        if k % 3 == 0:
+            rig2.push("B", make_view(static, r_b, rng), t2)
+        fused2, _ = rig2.fuse(t2)
+        pts = np.array([p[:3] for p in fused2["pose"]])
+        if prev is not None:
+            deltas.append(float(np.linalg.norm(pts - prev, axis=1).mean()))
+        prev = pts
+    ok(float(np.mean(deltas)) < 0.006,
+       "静止 + 双机不同帧率：帧间跳动 %.1f mm/tick（进门低通+年龄权重+One-Euro 三层一起压）"
+       % (np.mean(deltas) * 1000))
+    ok(float(np.max(deltas)) < 0.02,
+       "慢相机更新/让位的瞬间没有猛跳（最大单帧 %.1f mm）" % (np.max(deltas) * 1000))
+    # 快动作不拖影：姿势突变后 10 tick（1/3 秒）内要追上——One-Euro 速度越快放得越开
+    target = truth[18]
+    err = 1.0
+    for k in range(10):
+        t2 += TICK
+        rig2.push("A", make_view(target, np.eye(3), rng), t2)
+        rig2.push("B", make_view(target, r_b, rng), t2)
+        fused2, _ = rig2.fuse(t2)
+        pts = np.array([p[:3] for p in fused2["pose"]])
+        pts -= pts.mean(axis=0)
+        err = float(np.linalg.norm(pts - target, axis=1).mean())
+    ok(err < 0.03, "姿势突变后 1/3 秒追到 %.0f mm 内（平滑没换来拖影）" % (err * 1000))
 
     print("\n[6. Kabsch 本身]")
     a = np.random.default_rng(1).normal(size=(50, 3))
