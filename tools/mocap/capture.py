@@ -174,11 +174,10 @@ def run_phone(args, landmarker, sock, addr, frames):
         bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
         if bgr is None:
             return
-        bgr = cv2.flip(bgr, 1)   # 手机端发的是真实朝向；单相机 = 镜子手感，电脑端补翻转
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = landmarker.detect_for_video(image, int((time.time() - t0) * 1000))
-        frame = pack(result)
+        frame = mirror_pack(pack(result))   # 单相机 = 镜子手感；镜像做在关键点上，别翻像素
         if args.out:
             frames.append(frame)
         sock.sendto(json.dumps(frame, separators=(",", ":")).encode("utf-8"), addr)
@@ -188,6 +187,44 @@ def run_phone(args, landmarker, sock, addr, frames):
             print("  已收 %d 帧 · %s" % (state["n"], hit))
 
     phone.serve(on_frame)
+
+
+## MediaPipe pose 33 点里的左右对（1=左眼内…4=右眼内…31/32=左右脚尖）
+MIRROR_PAIRS = [(1, 4), (2, 5), (3, 6), (7, 8), (9, 10), (11, 12), (13, 14), (15, 16),
+                (17, 18), (19, 20), (21, 22), (23, 24), (25, 26), (27, 28), (29, 30), (31, 32)]
+
+
+def mirror_pack(frame: dict) -> dict:
+    """把一帧关键点做成镜像（单相机的「镜子手感」：抬右手，模型也抬右手）。
+
+    镜像必须做在**关键点**上而不是翻转像素：实测同一张图翻像素后 MediaPipe 的检出率
+    从 5/5 掉到 0/5（动漫样本最极端，真人也无谓冒这个险）。检测永远吃原始画面，
+    这里对结果做 x 取反 + 左右侧互换（身体成对点、双手整只、表情的 Left/Right 通道）。"""
+
+    def flip_pt(p):
+        return [-p[0]] + list(p[1:])
+
+    out = {"pose": None, "lh": None, "rh": None, "bs": None}
+    if frame.get("pose"):
+        pose = [flip_pt(p) for p in frame["pose"]]
+        for a, b in MIRROR_PAIRS:
+            pose[a], pose[b] = pose[b], pose[a]
+        out["pose"] = pose
+    if frame.get("rh"):
+        out["lh"] = [flip_pt(p) for p in frame["rh"]]
+    if frame.get("lh"):
+        out["rh"] = [flip_pt(p) for p in frame["lh"]]
+    if frame.get("bs"):
+        bs = {}
+        for k, v in frame["bs"].items():
+            if "Left" in k:
+                bs[k.replace("Left", "Right")] = v
+            elif "Right" in k:
+                bs[k.replace("Right", "Left")] = v
+            else:
+                bs[k] = v
+        out["bs"] = bs
+    return out
 
 
 def pack(result) -> dict:
@@ -382,14 +419,13 @@ def main():
         ok, bgr = cap.read()
         if not ok:
             break
-        if args.camera is not None:
-            bgr = cv2.flip(bgr, 1)   # 电脑摄像头是镜子：抬右手，屏幕上的模型也抬右手
+        mirror = args.camera is not None   # 电脑摄像头 = 镜子手感（镜像做在关键点上，见 mirror_pack）
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         ts = int((time.time() - t0) * 1000) if live else int(n / fps * 1000)
         result = landmarker.detect_for_video(image, ts)
 
-        frame = pack(result)
+        frame = mirror_pack(pack(result)) if mirror else pack(result)
         if args.out:
             frames.append(frame)
         if sock:
@@ -398,6 +434,8 @@ def main():
         n += 1
         if not args.no_preview:
             draw_preview(bgr, result)
+            if mirror:
+                bgr = cv2.flip(bgr, 1)   # 预览按镜子显示（骨架标注一起翻），检测吃的是原图
             tag = "REC %d" % len(frames) if args.out else ("LIVE" if live else "%d/%d" % (n, total))
             cv2.putText(bgr, tag, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (80, 220, 255), 2)
             cv2.imshow("mocap (Q/ESC 退出)", bgr)

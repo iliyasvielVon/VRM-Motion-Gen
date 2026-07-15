@@ -91,7 +91,8 @@ async def main():
             ok(True, "UDP 收到关键点包（%d 字节）" % len(data))
             ok(frame.get("pose") is not None and len(frame["pose"]) == 33,
                "包里有身体的 33 个关键点")
-            ok(all(len(p) == 3 for p in frame["pose"]), "每个点都是 3D 的 [x,y,z]")
+            ok(all(len(p) == 4 for p in frame["pose"]),
+               "每个点都是 [x,y,z,vis]（可见度用于丢跟踪时保持上一帧）")
             hips = frame["pose"][23]
             ok(abs(hips[0]) < 1.0 and abs(hips[1]) < 1.0,
                "坐标在合理量级（左胯 = %s，单位米、原点在胯心）" % [round(v, 3) for v in hips])

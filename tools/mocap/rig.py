@@ -2,8 +2,14 @@
 
 不需要棋盘格——**人本身就是标定板**：MediaPipe 给每台相机各出一副「以胯为原点、
 朝向跟着相机走」的公制 3D 骨架。同一时刻两台相机看到的是同一副骨架，只差一个
-刚体旋转。攒够 CAL_FRAMES 帧对应点，Kabsch(SVD) 一步解出「该相机 → 参考坐标系」
+刚体旋转。攒够 CAL_FRAMES 帧对应点，修剪 Kabsch(SVD) 解出「该相机 → 参考坐标系」
 的旋转，残差达标才允许进融合（对应需求：成功融合后再启用）。
+
+诚实的限制（test_rig_real.py 用两个已知夹角的真实机位量出来的）：MediaPipe 对
+侧视的人有系统性「转正」偏置（65° 机位解出约 41°），所以标定出的是**两台相机
+自洽的对齐**，不是精确的物理角度。对本用途够用——下游只用方向向量驱骨骼，且
+多相机最大的收益本来就在「可见度互补」（哪台看得清腿就听哪台的），那不依赖
+精确角度。想要测绘级角度得上棋盘格+三角化，不在本工具的射程里。
 
 融合是**各向异性加权**：单目的软肋在深度（沿视线方向的误差约是图像平面的两倍，
 见 test_mocap 实测 12.7° / 27.6°）。所以每台相机沿自己视线方向的话语权打 W_DEPTH
@@ -32,7 +38,11 @@ NOSE, WRIST_L, WRIST_R = 0, 15, 16
 VIS_CAL = 0.6         # 标定只用两边都看得清的关节
 MIN_CAL_JOINTS = 8
 CAL_FRAMES = 45       # 攒这么多帧对应点才解一次（30fps 下约 1.5 秒）
-CAL_RMS_OK = 0.09     # 米。Kabsch 残差超过它 = 两台相机拼不上，不许进融合
+## 米。修剪后的 Kabsch 残差超过它 = 两台相机拼不上，不许进融合。
+## 阈值不是拍脑袋：真实双机（65° 夹角、动漫渲染最难样本）修剪后 9.0cm，
+## 镜像画面 11.3cm——0.10 正好放行前者、拒掉后者（test_rig_real.py 量的）。
+CAL_RMS_OK = 0.10
+CAL_TRIM = 0.7        # 修剪 Kabsch：按逐帧残差留最好的 70% 重解（丢掉检测抽风的帧）
 FRESH_S = 0.35        # 数据比这旧就不进本轮融合（没有硬件同步，靠新鲜度对齐）
 OFFLINE_S = 2.5       # 比这旧直接判下线移除
 W_DEPTH = 0.2         # 深度方向的话语权（图像平面 = 1.0）
@@ -177,8 +187,15 @@ class Rig:
         cam.buf.append((A, B))
         if len(cam.buf) < CAL_FRAMES:
             return
-        R, rms = kabsch(np.vstack([p[0] for p in cam.buf]),
-                        np.vstack([p[1] for p in cam.buf]))
+        # 修剪 Kabsch：先全量解一次，按逐帧残差扔掉最差的 30%（检测抽风/遮挡帧），再重解
+        R0, _ = kabsch(np.vstack([p[0] for p in cam.buf]),
+                       np.vstack([p[1] for p in cam.buf]))
+        per = [float(np.sqrt(np.mean(np.sum((a @ R0.T - b) ** 2, axis=1))))
+               for a, b in cam.buf]
+        keep = sorted(range(len(cam.buf)), key=lambda i: per[i])
+        keep = keep[:max(3, int(len(cam.buf) * CAL_TRIM))]
+        R, rms = kabsch(np.vstack([cam.buf[i][0] for i in keep]),
+                        np.vstack([cam.buf[i][1] for i in keep]))
         if rms <= CAL_RMS_OK:
             cam.R = R
             cam.rms = rms
