@@ -298,17 +298,44 @@ def run_rig(args, sock, addr):
     if want_phone:
         import phone
 
-        marks = {}
+        # 每台手机一个推理线程 + 只留最新一帧的「信箱」。不能在 WebSocket 的事件循环里
+        # 直接推理：一帧 ~30ms，处理这台手机时别家的帧全堵在门外，双机的时间错位有一截
+        # 就是这么来的（实测年龄差中位 47ms）。慢了就丢帧，绝不排队攒延迟。
+        boxes = {}
+        box_lock = threading.Lock()
+
+        def phone_worker(cid):
+            lm = make_landmarker()
+            while not stop.is_set():
+                with box_lock:
+                    entry = boxes.get(cid)
+                    jpeg = entry["jpeg"] if entry else None
+                    if entry:
+                        entry["jpeg"] = None
+                if jpeg is None:
+                    if entry is None:
+                        return                        # 手机断开，信箱已拆
+                    entry["ev"].wait(0.5)
+                    entry["ev"].clear()
+                    continue
+                bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+                if bgr is not None:
+                    eat(cid, bgr, lm)                 # 融合模式不镜像：要的是真实朝向
 
         def phone_frame(conn_id, jpeg):
-            bgr = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-            if bgr is None:
-                return
-            if conn_id not in marks:
-                marks[conn_id] = make_landmarker()
-            eat(conn_id, bgr, marks[conn_id])   # 融合模式不镜像：要的是真实朝向
+            with box_lock:
+                entry = boxes.get(conn_id)
+                if entry is None:
+                    entry = boxes[conn_id] = {"jpeg": None, "ev": threading.Event()}
+                    threading.Thread(target=phone_worker, args=(conn_id,), daemon=True).start()
+                entry["jpeg"] = jpeg                  # 覆盖旧帧 = 丢帧保鲜
+                entry["ev"].set()
 
         def phone_close(conn_id):
+            with box_lock:
+                entry = boxes.pop(conn_id, None)
+                if entry:
+                    entry["ev"].set()
             rig.offline(conn_id, "手机断开")
             with plock:
                 previews.pop(conn_id, None)

@@ -80,7 +80,44 @@ def collect(log_path):
              "rd": round(rd, 4) if rd is not None else None})
         last_arrive[cid] = t_in
 
-    phone.serve_threaded(on_frame, on_close=lambda cid: rig.offline(cid, "手机断开"))
+    # 和 capture.py --rig 同一套「每机一线程 + 最新帧信箱」：WS 循环里不推理，
+    # 不然处理这台手机时别家的帧堵在门外，量出来的年龄差里混着排队延迟
+    boxes = {}
+    box_lock = threading.Lock()
+    stop_ev = threading.Event()
+
+    def worker(cid):
+        while not stop_ev.is_set():
+            with box_lock:
+                entry = boxes.get(cid)
+                jpeg = entry["jpeg"] if entry else None
+                if entry:
+                    entry["jpeg"] = None
+            if jpeg is None:
+                if entry is None:
+                    return
+                entry["ev"].wait(0.5)
+                entry["ev"].clear()
+                continue
+            on_frame(cid, jpeg)
+
+    def deliver(cid, jpeg):
+        with box_lock:
+            entry = boxes.get(cid)
+            if entry is None:
+                entry = boxes[cid] = {"jpeg": None, "ev": threading.Event()}
+                threading.Thread(target=worker, args=(cid,), daemon=True).start()
+            entry["jpeg"] = jpeg
+            entry["ev"].set()
+
+    def closed(cid):
+        with box_lock:
+            entry = boxes.pop(cid, None)
+            if entry:
+                entry["ev"].set()
+        rig.offline(cid, "手机断开")
+
+    phone.serve_threaded(deliver, on_close=closed)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     addr = ("127.0.0.1", 9977)
