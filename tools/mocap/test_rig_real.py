@@ -27,7 +27,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import capture  # noqa: E402  复用真实的 pack/to_godot 转换，别在测试里抄一份
 import mediapipe as mp  # noqa: E402
-from rig import CAL_FRAMES, Rig  # noqa: E402
+from rig import CAL_FRAMES, CAL_RMS_OK, Rig  # noqa: E402
 
 YAW_TRUE = 65.0
 TICK = 1.0 / 30.0
@@ -110,9 +110,9 @@ def main():
            "解出的旋转角 %.1f°（机位真值 65°，MediaPipe 转正偏置会把它解小——量级正确即可）" % angle)
         ok(abs(abs(axis[1]) - 1.0) < 0.05,
            "旋转轴就是竖直轴（|axis.y| = %.3f）——机位只在水平面上转过" % abs(axis[1]))
-        ok(st_b.get("rms", 1.0) <= 0.10,
-           "修剪后标定残差 %.1f cm ≤ 10 cm（同素材的镜像画面是 11.3 cm，会被拒）"
-           % (st_b.get("rms", 1.0) * 100))
+        ok(st_b.get("rms", 1.0) <= CAL_RMS_OK,
+           "修剪后标定残差 %.1f cm ≤ %.0f cm（镜像另有 det 判据守门）"
+           % (st_b.get("rms", 1.0) * 100, CAL_RMS_OK * 100))
 
     print("\n[融合出口]")
     ok(fused is not None and len(fused["pose"]) == 33, "两机位融合正常出 33 点骨架")

@@ -39,9 +39,11 @@ VIS_CAL = 0.6         # 标定只用两边都看得清的关节
 MIN_CAL_JOINTS = 8
 CAL_FRAMES = 45       # 攒这么多帧对应点才解一次（30fps 下约 1.5 秒）
 ## 米。修剪后的 Kabsch 残差超过它 = 两台相机拼不上，不许进融合。
-## 阈值不是拍脑袋：真实双机（65° 夹角、动漫渲染最难样本）修剪后 9.0cm，
-## 镜像画面 11.3cm——0.10 正好放行前者、拒掉后者（test_rig_real.py 量的）。
-CAL_RMS_OK = 0.10
+## 镜像画面另有专用判据（is_mirrored 的 det 符号），这个阈值只负责拦
+## 「不是同一个人 / 时间没对上」那类错配——那种残差在 20cm 以上。
+## 13cm 由实测定：65° 夹角 + 动漫渲染最难样本，跨机一致性最差到 ~12.7cm，
+## 真人素材好得多（平面动作实测 9.0cm）。
+CAL_RMS_OK = 0.13
 CAL_TRIM = 0.7        # 修剪 Kabsch：按逐帧残差留最好的 70% 重解（丢掉检测抽风的帧）
 FRESH_S = 0.35        # 数据比这旧就不进本轮融合（没有硬件同步，靠新鲜度对齐）
 OFFLINE_S = 2.5       # 比这旧直接判下线移除
@@ -72,6 +74,48 @@ def kabsch(A, B):
     return R, rms
 
 
+def is_mirrored(A, B):
+    """镜像判据：解**无约束**的最优正交阵（不做 det 修正），det = -1 就说明
+    这批对应点是反射关系。比拿绝对残差阈值卡稳得多：真实数据的最优解天然是
+    旋转（det=+1），反射数据的最优解天然是反射（det=-1），两边分得干干净净。
+
+    边界（实测得知，别指望它包打）：它管的是**点云级**反射——上游对关键点坐标
+    做了 x 取反那种。**镜像的视频文件**测不出来：MediaPipe 会把镜像画面里的人
+    当正常人解读，输出手性合法的骨架（动作左右调换而已），几何上没有反射。
+    那种情况靠残差兜底（动作不对称时残差会升），以及一条纪律：别喂镜像视频。"""
+    H = A.T @ B
+    U, _, Vt = np.linalg.svd(H)
+    return float(np.linalg.det(Vt.T @ U.T)) < 0.0
+
+
+def calibrate_pairs(pairs, trim=CAL_TRIM):
+    """对应点对 [(A_centered, B_centered), ...] → (R, 修剪后残差, 是否镜像)。
+    流式标定（_collect）和离线视频标定（rig_video.py）共用这一份数学。"""
+    A = np.vstack([p[0] for p in pairs])
+    B = np.vstack([p[1] for p in pairs])
+    if is_mirrored(A, B):
+        R0, rms0 = kabsch(A, B)
+        return R0, rms0, True
+    R0, _ = kabsch(A, B)
+    per = [float(np.sqrt(np.mean(np.sum((a @ R0.T - b) ** 2, axis=1))))
+           for a, b in pairs]
+    keep = sorted(range(len(pairs)), key=lambda i: per[i])
+    keep = keep[:max(3, int(len(pairs) * trim))]
+    R, rms = kabsch(np.vstack([pairs[i][0] for i in keep]),
+                    np.vstack([pairs[i][1] for i in keep]))
+    return R, rms, False
+
+
+## 一帧关键点 → 标定用的对应点对（公共可见关节，逐帧各自去质心）。离线管线也用它。
+def make_pair(cam_pose, f_pts, f_vis):
+    a_pts, a_vis = _np_pose(cam_pose)
+    idx = np.where((a_vis >= VIS_CAL) & (f_vis >= VIS_CAL))[0]
+    if len(idx) < MIN_CAL_JOINTS:
+        return None
+    return (a_pts[idx] - a_pts[idx].mean(axis=0),
+            f_pts[idx] - f_pts[idx].mean(axis=0))
+
+
 class Cam:
     def __init__(self, cam_id):
         self.id = cam_id
@@ -86,10 +130,13 @@ class Cam:
 
 
 class Rig:
-    def __init__(self, on_event=None):
+    def __init__(self, on_event=None, live=True):
         self._lock = threading.Lock()
         self.cams = {}
         self._event = on_event or (lambda msg: None)
+        # 离线视频模式 live=False：不做「断流即移除」和「被挪动看门狗」——
+        # 录像里人走出某台相机几秒是常事，相机本身根本不会动
+        self._live = live
 
     # ---------------------------------------------------------------- 输入
 
@@ -120,9 +167,19 @@ class Rig:
         with self._lock:
             return self._fuse(time.monotonic() if now is None else now)
 
+    def preset_cam(self, cam_id, R, is_ref=False, rms=None):
+        """离线管线用：标定在外面整段算好了，直接以「已融合」状态注册相机"""
+        with self._lock:
+            cam = self.cams.setdefault(cam_id, Cam(cam_id))
+            cam.R = np.asarray(R, dtype=float)
+            cam.rms = rms
+            cam.state = "on"
+            cam.is_ref = is_ref
+
     def _fuse(self, now):
-        for cid in [c for c in list(self.cams) if now - self.cams[c].t > OFFLINE_S]:
-            self._drop(cid, "%.0f 秒没数据" % OFFLINE_S)
+        if self._live:
+            for cid in [c for c in list(self.cams) if now - self.cams[c].t > OFFLINE_S]:
+                self._drop(cid, "%.0f 秒没数据" % OFFLINE_S)
 
         fresh = [c for c in self.cams.values()
                  if now - c.t < FRESH_S and c.frame and c.frame.get("pose")]
@@ -149,7 +206,8 @@ class Rig:
                     self._event("相机 %s 看到人了，开始标定——请站到两台相机都拍得到的位置动一动"
                                 % cam.id)
                 self._collect(cam, f_pts, f_vis)
-            self._watch_moved(on, fused)
+            if self._live:
+                self._watch_moved(on, fused)
 
         return self._pack(fused, on), self._status()
 
@@ -176,26 +234,20 @@ class Rig:
                 pts[j] = np.linalg.solve(M[j], b[j])
         return pts, vis
 
-    ## 标定：攒（本相机骨架, 融合骨架）对应点，够数就 Kabsch，残差达标才启用
+    ## 标定：攒（本相机骨架, 融合骨架）对应点，够数就修剪 Kabsch，残差达标才启用
     def _collect(self, cam, f_pts, f_vis):
-        a_pts, a_vis = _np_pose(cam.frame["pose"])
-        idx = np.where((a_vis >= VIS_CAL) & (f_vis >= VIS_CAL))[0]
-        if len(idx) < MIN_CAL_JOINTS:
+        pair = make_pair(cam.frame["pose"], f_pts, f_vis)
+        if pair is None:
             return
-        A = a_pts[idx] - a_pts[idx].mean(axis=0)      # 逐帧各自去质心：只解旋转
-        B = f_pts[idx] - f_pts[idx].mean(axis=0)
-        cam.buf.append((A, B))
+        cam.buf.append(pair)
         if len(cam.buf) < CAL_FRAMES:
             return
-        # 修剪 Kabsch：先全量解一次，按逐帧残差扔掉最差的 30%（检测抽风/遮挡帧），再重解
-        R0, _ = kabsch(np.vstack([p[0] for p in cam.buf]),
-                       np.vstack([p[1] for p in cam.buf]))
-        per = [float(np.sqrt(np.mean(np.sum((a @ R0.T - b) ** 2, axis=1))))
-               for a, b in cam.buf]
-        keep = sorted(range(len(cam.buf)), key=lambda i: per[i])
-        keep = keep[:max(3, int(len(cam.buf) * CAL_TRIM))]
-        R, rms = kabsch(np.vstack([cam.buf[i][0] for i in keep]),
-                        np.vstack([cam.buf[i][1] for i in keep]))
+        R, rms, mirrored = calibrate_pairs(list(cam.buf))
+        if mirrored:
+            cam.buf.clear()
+            self._event("相机 %s 的画面是镜像的（左右翻转），拒收——"
+                        "关掉它的镜像/自拍翻转再试" % cam.id)
+            return
         if rms <= CAL_RMS_OK:
             cam.R = R
             cam.rms = rms

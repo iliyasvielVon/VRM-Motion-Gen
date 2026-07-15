@@ -374,11 +374,33 @@ def main():
     src.add_argument("--rig", action="append",
                      help="多相机融合，逗号分隔：数字=本地摄像头，phone=手机（可随时加入/退出），"
                           "其余按流地址。例：--rig 0,phone")
+    src.add_argument("--rig-video", action="append",
+                     help="离线多机位：几段大概率同时录制的视频，自动对时→标定→融合。"
+                          "例：--rig-video 正面.mp4,侧面.mp4 --out 名字")
+    ap.add_argument("--sync-offsets",
+                    help="手动对时（最稳）：每段视频里同一时刻（如拍手）出现的秒数，"
+                         "逗号分隔与视频一一对应。例：--sync-offsets 0,1.27")
     ap.add_argument("--out", help="存成 animations/mocap/<名>.mocap.json")
     ap.add_argument("--udp", default="127.0.0.1:9977", help="实时模式喷给 Godot 的地址")
     ap.add_argument("--fps", type=float, default=30.0, help="摄像头模式的目标帧率")
     ap.add_argument("--no-preview", action="store_true", help="不开预览窗口")
     args = ap.parse_args()
+
+    if args.rig_video:
+        if not args.out:
+            sys.exit("--rig-video 需要 --out 名字（结果写成关键点文件，回编辑器「导入视频动补」）")
+        import rig_video
+        paths = [t.strip() for tok in args.rig_video for t in tok.split(",") if t.strip()]
+        if len(paths) < 2:
+            sys.exit("--rig-video 至少要两段视频（一段的话直接用 --video 就行）")
+        offsets = None
+        if args.sync_offsets:
+            offsets = [float(x) for x in args.sync_offsets.split(",")]
+            if len(offsets) != len(paths):
+                sys.exit("--sync-offsets 的个数（%d）要和视频段数（%d）一一对应"
+                         % (len(offsets), len(paths)))
+        rig_video.run(paths, args.out, make_landmarker, pack, OUT_DIR, sync_offsets=offsets)
+        return
 
     live = args.camera is not None or args.phone or args.url is not None or args.rig
 

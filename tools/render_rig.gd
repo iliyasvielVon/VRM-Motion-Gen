@@ -7,7 +7,7 @@ extends SceneTree
 ##
 ## godot --path . --script res://tools/render_rig.gd --resolution 720x1280 -- --yaw 65
 
-const FRAMES := 40
+const FRAMES := 120   # 4 秒：对时的互相关要够长的重叠才可信（短片段相关系数会趴地上）
 
 var _skel: Skeleton3D
 var _bones := {}
@@ -65,21 +65,32 @@ func _initialize() -> void:
 	DirAccess.make_dir_recursive_absolute(_dir)
 
 
-## 和 render_probe 相同的确定性动作（正面平面内张合屈肘 + 抬腿），保证两个机位帧同步
+## 确定性但**非周期**、且带**出平面**（前后向）分量的动作。三个都是刻意的：
+##   非周期（不可通约频率）—— 视频对时靠互相关，周期动作的峰值到处是别名；
+##   出平面 —— 近平面的点云镜像后能被旋转硬凑上（残差骗过标定门槛，实测发生过），
+##            手臂前后摆开之后镜像残差才真正撑起来；
+##   确定性 —— 两个机位靠帧号天然同步，不需要另行对齐。
 func _targets(f: int) -> Dictionary:
-	var t := float(f) / float(FRAMES) * TAU
-	var open := deg_to_rad(20.0 + 60.0 * (0.5 + 0.5 * sin(t)))
-	var bend := deg_to_rad(10.0 + 60.0 * (0.5 + 0.5 * sin(t * 2.0)))
-	var lift := deg_to_rad(12.0 * (0.5 + 0.5 * sin(t)))
-	var lu := Vector3(cos(open), sin(open), 0)
-	var ll := Vector3(cos(open + bend), sin(open + bend), 0)
+	var t := float(f) / 30.0 * TAU * 0.55
+	# 每个角度都叠两个不可通约频率：单频正弦的互相关满地都是周期别名格，
+	# 对时会锁到错的峰上（+78 帧那次就是 28 帧周期的肘弯干的）
+	var open := deg_to_rad(20.0 + 55.0 * (0.5 + 0.3 * sin(t * 1.13) + 0.2 * sin(t * 2.71 + 1.7)))
+	var bend := deg_to_rad(10.0 + 60.0 * (0.5 + 0.3 * sin(t * 1.97 + 0.9) + 0.2 * sin(t * 3.31)))
+	# ±22°：再大（试过 ±50°）侧机位视角下手臂持续被躯干挡住，MediaPipe 的"检出"
+	# 全靠脑补，坐标是编的——对时和标定全崩。真人拍动补也一样：别把手藏到身后。
+	var fwd := deg_to_rad(22.0) * sin(t * 0.71 + 0.3)
+	var lift := deg_to_rad(14.0) * (0.5 + 0.3 * sin(t * 0.83 + 1.1) + 0.2 * sin(t * 2.23 + 0.4))
+	var kick := 0.3 * sin(t * 0.57 + 2.0)                        # 腿也带点前后
+	var lu := Vector3(cos(open) * cos(fwd), sin(open), cos(open) * sin(fwd))
+	var lb := open + bend
+	var ll := Vector3(cos(lb) * cos(fwd), sin(lb), cos(lb) * sin(fwd))
 	return {
 		"LeftUpperArm": lu,
 		"LeftLowerArm": ll,
-		"RightUpperArm": Vector3(-lu.x, lu.y, 0),
-		"RightLowerArm": Vector3(-ll.x, ll.y, 0),
-		"LeftUpperLeg": Vector3(sin(lift), -cos(lift), 0),
-		"RightUpperLeg": Vector3(-sin(lift), -cos(lift), 0),
+		"RightUpperArm": Vector3(-lu.x, lu.y, lu.z),
+		"RightLowerArm": Vector3(-ll.x, ll.y, ll.z),
+		"LeftUpperLeg": Vector3(sin(lift), -cos(lift), kick).normalized(),
+		"RightUpperLeg": Vector3(-sin(lift), -cos(lift), -kick).normalized(),
 	}
 
 

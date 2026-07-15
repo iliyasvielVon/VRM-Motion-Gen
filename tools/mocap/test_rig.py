@@ -131,8 +131,9 @@ def main():
         rig.push("C", {"pose": [[float(v[0]), float(v[1]), float(v[2]), 1.0] for v in pm]}, t)
         fused, status = rig.fuse(t)
     st_c = next((e for e in status if e["id"] == "C"), None)
-    ok(st_c is not None and st_c["st"] != "on", "镜像相机 C 标定 %d 帧仍不收敛，一直没被启用" % (CAL_FRAMES * 3))
-    ok(any("未收敛" in e for e in events), "屏幕播报了「标定未收敛，检查画面是否被镜像」")
+    ok(st_c is not None and st_c["st"] != "on",
+       "镜像相机 C 一直没被启用（det 判据直接识破反射）")
+    ok(any("镜像" in e for e in events), "屏幕播报了「画面是镜像的，拒收」")
 
     print("\n[6. Kabsch 本身]")
     a = np.random.default_rng(1).normal(size=(50, 3))
