@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rig import CAL_FRAMES, VIEW_LOCAL, Rig, kabsch  # noqa: E402
+import rig as rig_mod  # noqa: E402
+from rig import CAL_FRAMES, VIEW_LOCAL, Rig, is_mirrored, kabsch  # noqa: E402
 
 FIX = Path(__file__).resolve().parent.parent.parent / "animations/mocap/自检正面.mocap.json"
 TICK = 1.0 / 30.0
@@ -179,6 +180,82 @@ def main():
         pts -= pts.mean(axis=0)
         err = float(np.linalg.norm(pts - target, axis=1).mean())
     ok(err < 0.03, "姿势突变后 1/3 秒追到 %.0f mm 内（平滑没换来拖影）" % (err * 1000))
+
+    print("\n[8. 实测回归（真机日志里抓到的三个问题，各钉一条）]")
+    # 8a 摇头要传出去：头的朝向藏在鼻/耳的小三角形里，两台带标定偏差的相机逐点平均
+    # 会把它抹掉（真机实测：用户摇头，模型纹丝不动）。修法 = 脸单源直取。
+    rig3 = Rig(on_event=lambda m: None)
+    rig3.preset_cam("A", np.eye(3), is_ref=True)
+    rig3.preset_cam("B", rot_y(75.0 - 8.0), rms=0.05)   # B 的标定故意差 8°（模拟转正偏置）
+    t3 = 2000.0
+
+    def head_yaw(pts):
+        fwd = pts[0] - (pts[7] + pts[8]) / 2.0          # 鼻尖 - 双耳中点
+        return math.degrees(math.atan2(-fwd[2], fwd[0]))
+
+    outs, tru = [], []
+    for k in range(80):
+        t3 += TICK
+        yaw = 25.0 * math.sin(k / 10.0)
+        c, s_ = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+        rh = np.array([[c, 0, s_], [0, 1, 0], [-s_, 0, c]])
+        tr = truth[0].copy()
+        head_c = tr[:11].mean(axis=0)
+        tr[:11] = (tr[:11] - head_c) @ rh.T + head_c    # 只转头
+        rig3.push("A", make_view(tr, np.eye(3), rng, depth=0.012, plane=0.005), t3)
+        rig3.push("B", make_view(tr, rot_y(75.0), rng, depth=0.012, plane=0.005), t3)
+        fused3, _ = rig3.fuse(t3)
+        if k > 15:
+            pts = np.array([q[:3] for q in fused3["pose"]])
+            outs.append(head_yaw(pts))
+            tru.append(head_yaw(tr))
+    corr = float(np.corrcoef(outs, tru)[0, 1])
+    amp = float(np.std(outs) / max(np.std(tru), 1e-9))
+    ok(corr > 0.85 and 0.55 < amp < 1.4,
+       "摇头 ±25°（B 标定带 8° 偏差）：输出头朝向相关 %.2f、幅度保持 %.0f%%——脸单源没被平均抹掉"
+       % (corr, amp * 100))
+
+    # 8b 时间错位的运动补偿：B 永远比 A 慢一拍（10fps + 内容滞后），转身时
+    # 不外推的话融合被旧姿势往回拽出「鬼影」。同一份数据开/关补偿各跑一遍对比。
+    def run_skew(comp):
+        rig_mod.VEL_COMP_MAX = 0.15 if comp else 0.0
+        r4 = Rig(on_event=lambda m: None)
+        r4.preset_cam("A", np.eye(3), is_ref=True)
+        r4.preset_cam("B", rot_y(75.0), rms=0.03)
+        rng4 = np.random.default_rng(21)
+        t4 = 3000.0
+        errs = []
+        for k in range(60):
+            t4 += TICK
+            spin = rot_y(4.0 * k)                        # 整个人 120°/s 匀速转身
+            tr = truth[0] @ spin.T
+            r4.push("A", make_view(tr, np.eye(3), rng4), t4)
+            if k % 3 == 0:                               # B 只有 10fps，天然比 A 旧
+                r4.push("B", make_view(tr, rot_y(75.0), rng4), t4)
+            fused4, _ = r4.fuse(t4)
+            if k > 15:
+                pts = np.array([q[:3] for q in fused4["pose"]])
+                pts -= pts.mean(axis=0)
+                errs.append(float(np.linalg.norm(pts - tr, axis=1).mean()))
+        return float(np.mean(errs))
+
+    e_on = run_skew(True)
+    e_off = run_skew(False)
+    rig_mod.VEL_COMP_MAX = 0.15
+    # 差值看着不大是因为两边都背着同一份 One-Euro 稳态滞后（~30mm 基线），
+    # 补偿消的是「慢机拖影」那一份——方向和量级都要对
+    ok(e_on < e_off - 0.002,
+       "转身 120°/s + 慢机滞后：开运动补偿误差 %.1f mm < 不补 %.1f mm——慢机拖影被外推抵掉"
+       % (e_on * 1000, e_off * 1000))
+
+    # 8c 镜像判据不误杀：真机上遮挡期的退化数据曾让 det 翻负、误杀了没镜像的手机
+    rng8 = np.random.default_rng(11)
+    garbage_a = rng8.normal(size=(200, 3))
+    garbage_b = rng8.normal(size=(200, 3))               # 完全不相关：det 一半概率翻负
+    ok(not is_mirrored(garbage_a, garbage_b),
+       "不相关的垃圾数据不再被误判成镜像（反射拟合没有明显优势，边际条件挡住）")
+    ok(is_mirrored(garbage_a * np.array([-1.0, 1.0, 1.0]), garbage_a),
+       "真正的点云反射照旧一抓一个准")
 
     print("\n[6. Kabsch 本身]")
     a = np.random.default_rng(1).normal(size=(50, 3))

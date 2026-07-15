@@ -24,3 +24,6 @@ export/
 # 临时文件
 *.tmp
 __pycache__/
+
+# 多相机实测诊断的原始日志（用户动作数据，只在本机分析用）
+tools/mocap/rig_diag*.jsonl

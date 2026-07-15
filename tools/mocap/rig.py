@@ -64,9 +64,18 @@ SMOOTH_IN = 0.5
 OE_MIN_CUTOFF = 1.0   # Hz，静止时的截止频率——越小越稳
 OE_BETA = 1.2         # 速度每 1 m/s 抬高这么多 Hz
 OE_D_CUTOFF = 1.0     # 速度估计自身的截止频率
-## ④ 手/表情的来源相机要粘滞：挑战者的可见度要比现任高出这么多才换人，
+## ④ 手/表情/脸的来源相机要粘滞：挑战者的可见度要比现任高出这么多才换人，
 ##    不然可见度一抖，手就在两台相机的版本之间闪切。
 SRC_HYSTERESIS = 0.15
+## ⑤ 时间错位的运动补偿：各相机到帧有先有后（实测双机年龄差 p95 ≈ 110ms），
+##    运动中 110ms = 手臂差出十几厘米，直接平均会糊出一个「鬼影中间态」——
+##    这就是「模型和真人对不上号」的主因。融合前按各机自己的速度估计把数据
+##    外推到当前时刻，外推上限封在这（太远的外推放大噪声）。
+VEL_COMP_MAX = 0.15
+## ⑥ 脸（鼻/眼/耳/嘴，pose 的 0~10 号点）单源直取，不参与多机平均：
+##    头的朝向信号藏在这 ~15cm 的小三角形里，两台带着标定偏差的相机逐点平均
+##    会把它直接抹掉（实测用户摇头模型纹丝不动）。四肢骨头长，不怕平均；脸不行。
+FACE_N = 11
 
 
 def _np_pose(pose):
@@ -101,7 +110,15 @@ def is_mirrored(A, B):
     那种情况靠残差兜底（动作不对称时残差会升），以及一条纪律：别喂镜像视频。"""
     H = A.T @ B
     U, _, Vt = np.linalg.svd(H)
-    return float(np.linalg.det(Vt.T @ U.T)) < 0.0
+    R_any = Vt.T @ U.T
+    if float(np.linalg.det(R_any)) >= 0.0:
+        return False
+    # 边际条件（实测补丁）：遮挡期的退化数据会让 det 偶尔翻负，真机上误杀过一次
+    # 没镜像的手机。要求反射拟合**明显**好于旋转拟合才定罪——真镜像实测比值 0.87，
+    # 退化噪声的比值贴着 1.0，分得开。
+    rms_ref = float(np.sqrt(np.mean(np.sum((A @ R_any.T - B) ** 2, axis=1))))
+    _, rms_rot = kabsch(A, B)
+    return rms_ref < rms_rot * 0.9
 
 
 def calibrate_pairs(pairs, trim=CAL_TRIM):
@@ -145,6 +162,8 @@ class Cam:
         self.resid = deque(maxlen=RECAL_WIN)
         self.pts_f = None              # 进门低通后的关键点 / 可见度（融合用它，标定用原始）
         self.vis_f = None
+        self.vel_f = None              # 速度估计（时间错位的运动补偿用）
+        self.cal_t = -1.0              # 上次进标定的帧时刻（防止同一帧被 30Hz 融合灌水）
 
 
 class Rig:
@@ -159,6 +178,7 @@ class Rig:
         self._hand_src = {}            # "lh"/"rh" -> 现任来源相机（粘滞）
         self._hand_f = {}              # "lh"/"rh" -> 低通后的手部点云
         self._bs_src = None
+        self._face_src = None          # 脸的来源相机（单源直取，见 FACE_N 的注释）
 
     # ---------------------------------------------------------------- 输入
 
@@ -172,11 +192,16 @@ class Rig:
             now = time.monotonic() if t is None else t
             if frame.get("pose"):
                 pts, vis = _np_pose(frame["pose"])
-                if cam.pts_f is not None and now - cam.t < FRESH_S:
+                dt = now - cam.t
+                if cam.pts_f is not None and dt < FRESH_S:
+                    old_pts = cam.pts_f
                     cam.pts_f = SMOOTH_IN * cam.pts_f + (1.0 - SMOOTH_IN) * pts
                     cam.vis_f = SMOOTH_IN * cam.vis_f + (1.0 - SMOOTH_IN) * vis
+                    v = (cam.pts_f - old_pts) / max(dt, 1e-3)
+                    cam.vel_f = v if cam.vel_f is None else 0.5 * cam.vel_f + 0.5 * v
                 else:
                     cam.pts_f, cam.vis_f = pts, vis   # 断流后回来别跨着洞平滑
+                    cam.vel_f = None
             cam.frame = frame
             cam.t = now
 
@@ -252,8 +277,12 @@ class Rig:
         for cam in on:
             if cam.pts_f is None:
                 continue
-            age_w = max(0.05, 1.0 - (now - cam.t) / FRESH_S)
-            P = cam.pts_f @ cam.R.T                   # 旋进参考坐标系
+            age = now - cam.t
+            age_w = max(0.05, 1.0 - age / FRESH_S)
+            pts_c = cam.pts_f
+            if cam.vel_f is not None:                 # 运动补偿：外推到「现在」，别拿旧姿势平均
+                pts_c = pts_c + cam.vel_f * min(age, VEL_COMP_MAX)
+            P = pts_c @ cam.R.T                       # 旋进参考坐标系
             d = cam.R @ VIEW_LOCAL
             W = (np.eye(3) - np.outer(d, d)) + W_DEPTH * np.outer(d, d)
             for j in range(POSE_N):
@@ -290,6 +319,10 @@ class Rig:
 
     ## 标定：攒（本相机骨架, 融合骨架）对应点，够数就修剪 Kabsch，残差达标才启用
     def _collect(self, cam, f_pts, f_vis):
+        if cam.t == cam.cal_t:
+            return          # 融合 30Hz、相机 ~10fps：同一帧别灌 2~3 次水，
+                            # 45 个「对应点」得是 45 个不同姿势才叫标定
+        cam.cal_t = cam.t
         pair = make_pair(cam.frame["pose"], f_pts, f_vis)
         if pair is None:
             return
@@ -355,6 +388,17 @@ class Rig:
         if fused is None:
             return None
         f_pts, f_vis = fused
+        f_pts = f_pts.copy()
+        face = self._face_cam(on)
+        if face is not None and face.pts_f is not None:
+            F = face.pts_f[:FACE_N]
+            if face.vel_f is not None:
+                F = F + face.vel_f[:FACE_N] * min(now - face.t, VEL_COMP_MAX)
+            F = F @ face.R.T
+            # 只借这台相机的「相对几何」（头的朝向就藏在鼻子和双耳的相对位置里），
+            # 平移对齐到融合脸的质心——绝对位置仍跟着融合出来的身体走
+            F = F - F.mean(axis=0) + f_pts[:FACE_N].mean(axis=0)
+            f_pts[:FACE_N] = F
         f_pts = self._one_euro(f_pts, now)
         pose = [[round(float(p[0]), 4), round(float(p[1]), 4), round(float(p[2]), 4),
                  round(float(v), 3)] for p, v in zip(f_pts, f_vis)]
@@ -390,6 +434,18 @@ class Rig:
             H = 0.5 * prev + 0.5 * H
         self._hand_f[key] = H
         return [[round(float(x), 4) for x in p] for p in H]
+
+    ## 脸的来源相机：鼻尖看得最清的那台（= 最正对脸的），带粘滞
+    def _face_cam(self, on):
+        cand = {c.id: (float(c.vis_f[NOSE]), c) for c in on if c.vis_f is not None}
+        if not cand:
+            self._face_src = None
+            return None
+        best = max(cand, key=lambda c: cand[c][0])
+        if self._face_src in cand and cand[best][0] - cand[self._face_src][0] < SRC_HYSTERESIS:
+            best = self._face_src
+        self._face_src = best
+        return cand[best][1]
 
     ## 表情挑「鼻尖看得最清」的那台相机（= 最正对脸的那台），同样粘滞
     def _pick_bs(self, on):
